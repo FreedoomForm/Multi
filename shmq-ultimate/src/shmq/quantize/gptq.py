@@ -102,12 +102,14 @@ class GPTQQuantizer:
         # Apply GPTQ block by block (along cin axis)
         for i in range(0, self.cin, self.blocksize):
             i_end = min(i + self.blocksize, self.cin)
-            block_idx = torch.arange(i, i_end)
 
-            # Quantize this block
-            W_block = W[:, i:i_end]  # (cout, block_size)
-            # Compute scale for this block (per-group within the block)
-            # For simplicity, assume group_size divides blocksize
+            # CRITICAL: snapshot the ORIGINAL weights of this block BEFORE quantization.
+            # If we use a view (W_block = W[:, i:i_end]), in-place updates below
+            # will also mutate W_block, making err_block == 0 and GPTQ silently
+            # degenerate to plain RTN. See audit note (Task 14, worklog.md).
+            W_block_orig = W[:, i:i_end].clone()  # (cout, block_size)
+
+            # Quantize this block (per-group within the block).
             n_groups_in_block = (i_end - i) // self.group_size
             for g in range(n_groups_in_block):
                 g_start = i + g * self.group_size
@@ -118,8 +120,11 @@ class GPTQQuantizer:
                 W[:, g_start:g_end] = q_g * s.unsqueeze(-1)
                 int_codes[:, g_start:g_end] = q_g.to(torch.int8)
 
-            # Propagate error to remaining columns
-            err_block = (W_block - W[:, i:i_end]) / Hinv_sqrt[i:i_end, i:i_end].diag().unsqueeze(0)
+            # Propagate error to remaining columns (this is the OBS update).
+            # err = (W_orig - Q) / Hinv_sqrt_diag
+            # W_remaining -= err @ Hinv[block, remaining]
+            err_block = (W_block_orig - W[:, i:i_end]) / \
+                        Hinv_sqrt[i:i_end, i:i_end].diag().unsqueeze(0)
             if i_end < self.cin:
                 W[:, i_end:] -= err_block @ Hinv[i:i_end, i_end:]
 

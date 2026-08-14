@@ -435,6 +435,7 @@ class SHMQPipeline:
             self.model, self.layer_names,
             self.bit_allocation, post_fusion_activations,
             use_gptq_for_4bit=True,
+            sqc_multipliers=self.sqc_multipliers if self.config.enable_sqc else None,
         )
         t1 = time.time()
         n_4bit  = sum(1 for r in results.values() if r["n_bits"] == 4)

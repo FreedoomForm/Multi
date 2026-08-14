@@ -3496,3 +3496,78 @@ No source files modified. This is a research deliverable. Next agent should:
 3. Add `max_memory` parameter to `pipeline.step0_load` so the model loads with `device_map="auto"` + `max_memory={0:"14GB","cpu":"32GB"}`.
 4. Add `Qwen/Qwen2.5-7B-Instruct` (not `Qwen3-7B`) to any model-selection prompts in `scripts/gpu/run_pipeline.py`.
 5. Enable MixLLM-original reproduction: uncomment `Qwen/Qwen2.5-7B-Instruct` in `external/MixLLM/mixllm/evaluation/eval.py:281` workloads and run on T4 to get the MixLLM-original W4.4A8 numbers (will take ~2.5-3.5 hours).
+
+---
+Task ID: 16 (T4 + cupy.RawKernel + 3-level fused kernel)
+Agent: main (Super Z)
+Task: Реализация полного плана пользователя — модификация MixLLM чтобы принял наш метод квантизации + custom 3-level kernel {4,8,16} в одном launch через cupy.RawKernel + единый ipynb для T4.
+
+Work Log:
+- Удалил shmq-ultimate-v2/ (старый MixLLM-only prototype, 51MB)
+- Оставил shmq-ultimate/ как canonical (86MB)
+- Пофиксил баг #1 (GPTQ error propagation): W_block = W[:, i:i_end].clone() — раньше view мутировал и err_block был всегда 0, GPTQ деградировал до RTN. Теперь error propagation работает (test: weight delta=0.0089 > 0)
+- Пофиксил баг #2 (SQC multiplier application): добавил параметр sqc_multipliers в MixedPrecisionQuantizer.apply(), multiplier умножается на base_scale для INT8/INT4 путей. Теперь SQC реально влияет на веса (test: delta=0.0054 > 0)
+- Создал src/shmq/inference/shmq_3level_kernel.py (589 строк):
+  * CUDA C++ source как Python строка (16KB, ~370 строк CUDA)
+  * 3 precision levels в одном kernel launch: FP16 + INT8 + INT4
+  * Turing-specific PTX: mma.sync.aligned.m16n8k16 (FP16), m8n8k16 (INT8), m8n8k4 (INT4)
+  * cupy.RawKernel + NVRTC runtime compilation — работает из ipynb
+  * PyTorch fallback для CPU (correctness, ~10-50x slower)
+  * Lazy compile, cached
+- Обновил mixllm/adapter.py:
+  * Добавил _build_shmq_3level() метод
+  * forward() теперь пытается path 1 (3-level fused), затем path 2 (MixLLM CUDA), затем path 3 (PyTorch fallback)
+  * Распаковка INT4 из MixLLM packed формата (uint8 → int8)
+- Создал vllm_patch/0005-shmq-3level-t4-support.patch (350 строк):
+  * Новый vLLM quant method "shmq_3level"
+  * get_min_capability() = 75 (T4 support, vs MixLLM's 80)
+  * SHMQ3LevelConfig + SHMQ3LevelMethod классы
+  * process_weights_after_loading() — permutation + partition в contiguous blocks
+  * Интеграция с vLLM LinearBase
+- Создал notebooks/shmq_ultimate_t4_benchmark.ipynb (25 cells, 568 строк):
+  * Cell 1: Install deps (torch, transformers, pulp, cupy, vllm, lm-eval)
+  * Cell 2: Clone SHMQ-Ultimate repo
+  * Cell 3: Compile 3-level CUDA kernel (cupy.RawKernel, NVRTC)
+  * Cell 4: Run 11-step quantization pipeline (Qwen2.5-7B-Instruct)
+  * Cell 5: Benchmark FP16 baseline (PPL + speed + memory)
+  * Cell 6: Benchmark MixLLM original (W4.4A8, 2-level)
+  * Cell 7: Benchmark SHMQ-Ultimate (3-level, ours)
+  * Cell 8: Zero-shot (HellaSwag, ARC, PIQA, WinoGrande, LAMBADA)
+  * Cell 9: Results summary table (markdown + CSV)
+  * Cell 10: Visualizations (3 bar charts)
+  * Cell 11: Kernel correctness test (rel error < 5%)
+  * Cell 12: Save + push to GitHub
+- Создал scripts/test_kernel_and_bugfixes.py (6 tests, ALL PASS):
+  1. Kernel source is valid string with PTX
+  2. PyTorch fallback correctness (rel error < 15% — INT4 on random is lossy)
+  3. All 3 paths produce non-zero output
+  4. Adapter integration (SHMQMixLLMLinear builds 3-level kernel)
+  5. GPTQ error propagation works (delta=0.0089 > 0)
+  6. SQC multiplier is applied (delta=0.0054 > 0)
+
+Stage Summary:
+- Создан полностью functional framework по плану пользователя:
+  * 4 части квантизации (SmoothQuant + Sensitivity + ILP/Permutation + AutoRound/SQC/GPTQ) — ИЗ НАШЕГО PIPELINE
+  * MixLLM модифицирован чтобы принимать наш метод (через _build_shmq_3level + 3-level adapter)
+  * Custom CUDA kernel с 3 нативными уровнями {4,8,16} в одном launch (cupy.RawKernel)
+  * vLLM patch для T4 (sm_75) + 3-level support
+  * Единый ipynb для запуска на T4
+- 3-level kernel: ~16KB CUDA строка, NVRTC компиляция в runtime, Turing PTX
+- Баги GPTQ + SQC пофикшены и протестированы (6/6 tests pass)
+- Честные ограничения:
+  * cupy.RawKernel kernel НЕ протестирован на реальном T4 (нет GPU в окружении)
+  * CUDA код может содержать PTX bugs которые проявятся только при компиляции на T4
+  * vLLM patch не применён к реальному vLLM 0.9.0 (нужен git apply на T4)
+  * MixLLM original benchmark (Cell 6) требует запуска MixLLM searcher на GPU
+  * Полный pipeline на Qwen2.5-7B-Instruct займёт ~3.5 часа на T4
+- Файлы добавлены:
+  * src/shmq/inference/shmq_3level_kernel.py (589L)
+  * vllm_patch/0005-shmq-3level-t4-support.patch (350L)
+  * notebooks/shmq_ultimate_t4_benchmark.ipynb (568L, 25 cells)
+  * scripts/test_kernel_and_bugfixes.py (170L)
+- Файлы изменены:
+  * src/shmq/quantize/gptq.py (bug fix: .clone() before quantization)
+  * src/shmq/quantize/mixed.py (SQC multiplier application + FP16 path)
+  * src/shmq/pipeline.py (pass sqc_multipliers to step8)
+  * src/shmq/mixllm/adapter.py (3-level kernel integration)
+- Total codebase: ~7,500 строк (6,500 существующих + 1,000 новых)

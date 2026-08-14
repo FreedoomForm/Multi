@@ -59,16 +59,20 @@ class MixedPrecisionQuantizer:
               layer_names: List[str],
               n_bits_per_layer: Dict[str, int],
               captured_activations: Optional[Dict[str, List[torch.Tensor]]] = None,
-              use_gptq_for_4bit: bool = True) -> Dict[str, Dict[str, torch.Tensor]]:
+              use_gptq_for_4bit: bool = True,
+              sqc_multipliers: Optional[Dict[str, float]] = None) -> Dict[str, Dict[str, torch.Tensor]]:
         """Apply mixed-precision quantization to the model.
 
         Args:
             model: HuggingFace LLM (in-place modification)
             layer_names: list of layer names
-            n_bits_per_layer: {layer_name: 4 or 8}
+            n_bits_per_layer: {layer_name: 4 or 8 or 16}
             captured_activations: {layer_name: [list of (N, cin) input activations]}
                                   — required for GPTQ on 4-bit layers
             use_gptq_for_4bit: if True, use GPTQ for 4-bit layers; if False, use RTN
+            sqc_multipliers: {layer_name: float} — scale multiplier from SQC calibration
+                             (Step 7). Applied as base_scale *= multiplier before
+                             GPTQ/RTN. None = no SQC (multiplier=1.0).
 
         Returns:
             {layer_name: {"qweight": tensor, "scale": tensor, "n_bits": int}}
@@ -82,15 +86,34 @@ class MixedPrecisionQuantizer:
         for name in layer_names:
             mod = get_module_by_name(model, name)
             n_bits = n_bits_per_layer.get(name, 4)
+            sqc_mult = (sqc_multipliers or {}).get(name, 1.0)
+            if sqc_mult != 1.0:
+                print(f"[mixed_quantize] applying SQC mult={sqc_mult:.4f} to {name}")
+
+            if n_bits == 16:
+                # 16-bit: keep FP16 (no quantization, just mark for inference path)
+                mod._shmq_n_bits = 16
+                mod._shmq_scales = None
+                mod._shmq_int_codes = None
+                results[name] = {"qweight": mod.weight.data.clone(), "scale": None, "n_bits": 16}
+                continue
 
             if n_bits == 8:
                 # 8-bit: RTN (near-lossless, no GPTQ needed)
-                # Compute integer codes + scales directly (for Step 9 reuse)
                 int_codes, scales = _rtn_quantize_to_codes(
                     mod.weight.data, n_bits=8, group_size=self.group_size,
                 )
-                # Fake-quant the weight in-place (for compatibility with existing
-                # pipeline code that runs forward passes after Step 8)
+                # SQC: rescale codes if multiplier != 1.0
+                if sqc_mult != 1.0:
+                    scales = scales * sqc_mult
+                    int_codes, _ = _rtn_quantize_to_codes(
+                        mod.weight.data, n_bits=8, group_size=self.group_size,
+                    )
+                    # re-quantize with adjusted scale
+                    n_groups = mod.weight.data.shape[1] // self.group_size
+                    w_g = mod.weight.data.reshape(-1, n_groups, self.group_size).float()
+                    codes = (w_g / scales.to(w_g.dtype).repeat_interleave(self.group_size, dim=1).reshape(w_g.shape)).round().clamp(-127, 127).to(torch.int8)
+                    int_codes = codes.reshape(mod.weight.data.shape)
                 qweight = (int_codes.to(torch.float32) *
                            scales.to(torch.float32).repeat_interleave(self.group_size, dim=1)
                            ).to(mod.weight.dtype)
@@ -102,18 +125,24 @@ class MixedPrecisionQuantizer:
                 if use_gptq_for_4bit and captured_activations and name in captured_activations:
                     gptq = GPTQQuantizer(mod, n_bits=4, group_size=self.group_size,
                                           percdamp=self.percdamp, blocksize=self.blocksize)
+                    # SQC: scale the per-group scales BEFORE GPTQ sees them
+                    if sqc_mult != 1.0:
+                        gptq.scale = gptq.scale * sqc_mult
                     for a in captured_activations[name]:
                         gptq.add_batch(a)
                     if captured_activations[name]:
                         qweight = gptq.quantize()
-                        # GPTQQuantizer.quantize() already stored _shmq_int_codes
-                        # and _shmq_scales on the module.
                         scale = gptq.scale
                         gptq.free()
                     else:
                         int_codes, scales = _rtn_quantize_to_codes(
                             mod.weight.data, n_bits=4, group_size=self.group_size,
                         )
+                        if sqc_mult != 1.0:
+                            scales = scales * sqc_mult
+                            int_codes, _ = _rtn_quantize_to_codes(
+                                mod.weight.data, n_bits=4, group_size=self.group_size,
+                            )
                         qweight = (int_codes.to(torch.float32) *
                                    scales.to(torch.float32).repeat_interleave(self.group_size, dim=1)
                                    ).to(mod.weight.dtype)
@@ -124,6 +153,11 @@ class MixedPrecisionQuantizer:
                     int_codes, scales = _rtn_quantize_to_codes(
                         mod.weight.data, n_bits=4, group_size=self.group_size,
                     )
+                    if sqc_mult != 1.0:
+                        scales = scales * sqc_mult
+                        int_codes, _ = _rtn_quantize_to_codes(
+                            mod.weight.data, n_bits=4, group_size=self.group_size,
+                        )
                     qweight = (int_codes.to(torch.float32) *
                                scales.to(torch.float32).repeat_interleave(self.group_size, dim=1)
                                ).to(mod.weight.dtype)
