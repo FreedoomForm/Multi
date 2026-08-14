@@ -552,6 +552,32 @@ def shmq_3level_gemm(
 
     if kernel is not None and X2d.is_cuda:
         try:
+            # If W4 is unpacked INT8, pack it to uint8 on GPU first
+            # (do this BEFORE the S3 contiguous check so we check the final tensor)
+            if W4 is not None and not W4_packed:
+                W4_eff = _pack_int4_on_gpu(W4)
+            else:
+                W4_eff = W4
+
+            # ---- Seam S3 hardening: log silent copies ----
+            # .contiguous() is called below on every tensor; if any of them
+            # is NOT already contiguous, this triggers a silent GPU memory
+            # copy. On 7B models this can spike memory by 3-5GB and OOM on T4.
+            # Log a warning (not an error) so we can diagnose in production.
+            _silent_copies = []
+            for _name, _t in [("X", X2d), ("W16", W16), ("W8", W8),
+                              ("W4", W4_eff), ("S8", S8), ("S4", S4)]:
+                if _t is not None and not _t.is_contiguous():
+                    _silent_copies.append(
+                        f"{_name}: shape={tuple(_t.shape)}, "
+                        f"strides={_t.stride()}, "
+                        f"size={_t.numel() * _t.element_size() // 1024}KB"
+                    )
+            if _silent_copies:
+                print(f"[shmq_3level_gemm] WARNING: silent contiguous copy on "
+                      f"{len(_silent_copies)} tensors (seam S3): "
+                      f"{'; '.join(_silent_copies[:3])}")
+
             Y = torch.empty(M, N, dtype=torch.float16, device=X2d.device)
 
             # Pack arguments — pass None as a 1-element dummy tensor of right type
@@ -563,12 +589,7 @@ def shmq_3level_gemm(
             X_cp = cp.from_dlpack(X2d.detach().contiguous())
             W16_cp = _to_cp(W16, cp.float16, (1, K))
             W8_cp = _to_cp(W8, cp.int8, (1, K))
-            # If W4 is unpacked INT8, pack it to uint8 on GPU first
-            if W4 is not None and not W4_packed:
-                W4_packed_t = _pack_int4_on_gpu(W4)
-            else:
-                W4_packed_t = W4
-            W4_cp = _to_cp(W4_packed_t, cp.uint8, (1, max(1, K // 2)))
+            W4_cp = _to_cp(W4_eff, cp.uint8, (1, max(1, K // 2)))
             S8_cp = _to_cp(S8, cp.float16, (1, max(1, K // 128)))
             S4_cp = _to_cp(S4, cp.float16, (1, max(1, K // 128)))
             Y_cp = cp.from_dlpack(Y)

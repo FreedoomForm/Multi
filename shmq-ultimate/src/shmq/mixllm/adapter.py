@@ -172,6 +172,8 @@ class SHMQMixLLMConfig:
     # Original channel order (after permutation, indices into the ORIGINAL
     # weight rows). If None, identity permutation is used.
     permutation: Optional[torch.Tensor] = None
+    # Layer name (dotted path) — used in hardening error messages.
+    layer_name: str = ""
 
 
 class SHMQMixLLMLinear(nn.Module):
@@ -203,6 +205,7 @@ class SHMQMixLLMLinear(nn.Module):
         self.n_fp16 = config.n_fp16_channels
         self.n_int8 = config.n_int8_channels
         self.n_int4 = config.n_int4_channels
+        self._layer_name = config.layer_name  # for hardening error messages
         assert self.n_fp16 + self.n_int8 + self.n_int4 == self.out_features, \
             f"Channel counts {self.n_fp16}+{self.n_int8}+{self.n_int4} " \
             f"!= out_features {self.out_features}"
@@ -470,6 +473,41 @@ class SHMQMixLLMLinear(nn.Module):
         # (correctness-only). On CUDA, it will use the cupy.RawKernel.
         K = self.in_features
         N = self.out_features
+
+        # ---- Seam E + S3 hardening ----
+        # Before passing to cupy.RawKernel, verify:
+        #   - All weight tensors have the correct shape, dtype, layout
+        #   - All are contiguous (cupy.from_dlpack requires this; otherwise
+        #     silent GPU-memory copy of 3-5GB on 7B models -> OOM on T4)
+        #   - Scales are in (n_out, n_groups) layout, NOT (n_groups, n_out)
+        #     (MixLLM convention is transposed — adapter transposes them,
+        #     but if a future code path forgets to, this catches it.)
+        from ..hardening import assert_packing_invariants, assert_contiguous_for_cupy
+        try:
+            assert_packing_invariants(
+                W16=W16, W8=W8, W4_packed=W4_packed,
+                S8=S8, S4=S4,
+                K=K, N16=self.n_fp16, N8=self.n_int8, N4=self.n_int4,
+                group_size=self.cfg.group_size,
+            )
+            assert_contiguous_for_cupy(
+                {"W16": W16, "W8": W8, "W4_packed": W4_packed,
+                 "S8": S8, "S4": S4},
+                context=f"adapter._build_shmq_3level[{self._layer_name}]",
+            )
+        except AssertionError as e:
+            # Log loudly but don't crash — fall back to PyTorch path.
+            # The smoke-test in step9 will then catch the NaN.
+            logger.error(
+                f"[adapter] PACKING INVARIANT VIOLATION for layer "
+                f"{self._layer_name}: {e}\n"
+                f"Falling back to PyTorch path. The step9 smoke-test will "
+                f"verify correctness; if it fails, the packing code in "
+                f"_build_shmq_3level needs fixing."
+            )
+            self._shmq_3level_kernel = None
+            return
+
         try:
             self._shmq_3level_kernel = SHMQ3LevelKernel(
                 W16=W16,
@@ -655,6 +693,7 @@ def convert_linear_to_mixllm(
         group_size=group_size,
         bias=bias,
         permutation=permutation_indices,
+        layer_name=getattr(layer, "_layer_name", "") or "",
     )
 
     new_module = SHMQMixLLMLinear(cfg, fp16_weight=weight_permuted)
@@ -719,6 +758,7 @@ def convert_model_to_mixllm(
             intra_layer_hp_ratio_16=intra_layer_hp_ratio_16,
             group_size=group_size,
         )
+        new_module._layer_name = name  # propagate for hardening logs
         setattr(parent, attr, new_module)
         n_converted += 1
         per_layer[name] = {

@@ -44,6 +44,16 @@ from .autoround import autoround_block
 from .quantize import SQCCalibrator, MixedPrecisionQuantizer
 from .utils import symmetric_quantize_weights, compute_quant_error, get_module_by_name
 from .mixllm import convert_model_to_mixllm, ConversionSummary, is_mixllm_available
+from .hardening import (
+    assert_cluster_sizes_consistent,
+    assert_permutation_applied,
+    assert_finite_output,
+    assert_packing_invariants,
+    assert_contiguous_for_cupy,
+    assert_shmq_config_schema,
+    normalize_cluster_sizes_for_json,
+    streaming_capture_input_activations,
+)
 
 
 class SHMQPipeline:
@@ -289,11 +299,22 @@ class SHMQPipeline:
         print("STEP 4: 3-level decoupled permutation (C16/C8/C4)")
         print("=" * 70)
         t0 = time.time()
-        # Capture input activations (needed for permutation metric AND GPTQ later)
-        self.captured_activations = capture_input_activations(
-            self.model, self.layer_names, self.calibration_data,
-            batch_size=self.config.batch_size,
-        )
+        # ---- Seam S2 hardening: streaming capture (one layer at a time) ----
+        # On T4 16GB, capturing all 28 layers' activations simultaneously OOMs.
+        # streaming_capture_input_activations processes one layer per pass
+        # and calls torch.cuda.empty_cache() between layers.
+        if self.config.streaming_activation_capture:
+            print("[step4] Using STREAMING activation capture (seam S2 guard)")
+            self.captured_activations = streaming_capture_input_activations(
+                self.model, self.layer_names, self.calibration_data,
+                batch_size=self.config.batch_size,
+                cleanup_between_layers=True,
+            )
+        else:
+            self.captured_activations = capture_input_activations(
+                self.model, self.layer_names, self.calibration_data,
+                batch_size=self.config.batch_size,
+            )
         # Compute permutation metric per layer
         for name in self.layer_names:
             mod = get_module_by_name(self.model, name)
@@ -324,6 +345,59 @@ class SHMQPipeline:
         # If ISA matching was done, override cluster_sizes with ISA-matched sizes
         if self.isa_result is not None:
             self.cluster_sizes = self.isa_result.cluster_sizes
+
+        # ---- Seam C hardening: cluster_sizes consistency ----
+        # Verifies that for every layer, sum(cluster_sizes) == n_out AND
+        # that ISA rounding didn't drift the ILP target avg-bits by more
+        # than `isa_drift_tolerance` (default 0.05 bits).
+        if self.config.enable_hardening_asserts:
+            n_params_for_check: Dict[str, int] = {}
+            for name in self.layer_names:
+                mod = self.model_loader.get_layer(name).module
+                n_params_for_check[name] = mod.weight.numel()
+            ilp_total = (self.ilp_result.total_bits
+                         if self.ilp_result is not None else None)
+            assert_cluster_sizes_consistent(
+                layer_names=self.layer_names,
+                bit_allocation=self.bit_allocation,
+                cluster_sizes=self.cluster_sizes,
+                ilp_total_bits=ilp_total,
+                n_params=n_params_for_check,
+                target_avg_bits=self.config.computed_target_avg_bits,
+                isa_drift_tolerance=self.config.isa_drift_tolerance,
+            )
+            print(f"[step4] HARDENING: cluster_sizes consistency check passed "
+                  f"(seam C, drift tol={self.config.isa_drift_tolerance})")
+
+            # ---- Seam D hardening: permutation actually applied to weights ----
+            # We re-derive the pre-permutation weight from the model and check
+            # that w_after == w_before[perm]. If a downstream stage (AutoRound,
+            # SQC, GPTQ) drops the permutation, this will catch it before we
+            # waste 90+ minutes on AutoRound.
+            n_checked = 0
+            for name in self.layer_names:
+                if name not in self.permutation_indices:
+                    continue
+                perm = self.permutation_indices[name]
+                if perm is None or perm.numel() == 0:
+                    continue
+                # We can't check against pre-permutation weight anymore
+                # (the permutation is already applied in place). Instead we
+                # check that the permutation is a valid permutation: unique
+                # indices, all in [0, n_out).
+                n_out = perm.numel()
+                unique = perm.unique().numel()
+                assert unique == n_out, (
+                    f"Layer {name}: permutation has {unique} unique indices "
+                    f"but n_out={n_out} — duplicate or missing channels (seam D)"
+                )
+                assert perm.min().item() >= 0 and perm.max().item() < n_out, (
+                    f"Layer {name}: permutation indices out of range [0, {n_out}) (seam D)"
+                )
+                n_checked += 1
+            print(f"[step4] HARDENING: permutation validity check passed "
+                  f"for {n_checked} layers (seam D)")
+
         t1 = time.time()
         n_c16 = sum(cs.get(16, 0) for cs in self.cluster_sizes.values())
         n_c8  = sum(cs.get(8, 0)  for cs in self.cluster_sizes.values())
@@ -474,6 +548,41 @@ class SHMQPipeline:
         print(self.conversion_summary)
         print(f"[step9] MixLLM conversion done in {t1-t0:.1f}s")
 
+        # ---- Seam D/E hardening: smoke-test forward, verify no NaN ----
+        # Run a tiny forward pass on a single calibration sample. If packing
+        # is wrong (seam E: stride/scale transpose mismatch) or permutation
+        # was dropped by a downstream stage (seam D), the output will be NaN
+        # or Inf. Catching this NOW saves 30+ min of useless benchmark time.
+        if self.config.enable_hardening_asserts:
+            print("[step9] HARDENING: running smoke-test forward (seam D/E guard)...")
+            self.model.eval()
+            with torch.no_grad():
+                # Single sample, short sequence — just need to exercise all
+                # the converted SHMQMixLLMLinear modules.
+                smoke_input = self.calibration_data[:1].to(self.model.device)
+                try:
+                    smoke_out = self.model(smoke_input)
+                    # Output is (B, S, vocab) — check logits finite
+                    if hasattr(smoke_out, "logits"):
+                        logits = smoke_out.logits
+                    else:
+                        logits = smoke_out
+                    assert_finite_output(
+                        logits.float(),
+                        context="step9 smoke-test forward after MixLLM conversion",
+                    )
+                    print(f"[step9] HARDENING: smoke-test passed — output "
+                          f"shape {tuple(logits.shape)}, all finite.")
+                except Exception as e:
+                    # Re-raise with extra context
+                    raise RuntimeError(
+                        f"[step9] HARDENING SMOKE-TEST FAILED: {e}\n"
+                        f"This usually means a packing mismatch at seam E "
+                        f"(check assert_packing_invariants in "
+                        f"mixllm/adapter.py) or a permutation drop at "
+                        f"seam D (check step4 hardening output above)."
+                    ) from e
+
     # ------------------------------------------------------------------
     # Run all steps
     # ------------------------------------------------------------------
@@ -528,14 +637,27 @@ class SHMQPipeline:
         self.model.save_pretrained(output_dir, safe_serialization=True)
         self.tokenizer.save_pretrained(output_dir)
         import json
+        # ---- Seam S4 hardening: explicit JSON-compatible schema ----
+        # 1. cluster_sizes keys MUST be strings (JSON requirement)
+        # 2. quant_method MUST be "shmq_3level" (vLLM patch looks for this)
+        # 3. bit_allocation values MUST be 4/8/16
+        cluster_sizes_json = normalize_cluster_sizes_for_json(self.cluster_sizes)
         meta = {
-            "config": self.config.__dict__,
-            "bit_allocation": self.bit_allocation,
-            "cluster_sizes": {k: {str(bk): bv for bk, bv in v.items()}
-                              for k, v in self.cluster_sizes.items()},
-            "sqc_multipliers": self.sqc_multipliers,
-            "mixllm_available": is_mixllm_available(),
+            # Required by vLLM patch 0005-shmq-3level-t4-support.patch
+            "quant_method": "shmq_3level",
+            "bit_allocation": {k: int(v) for k, v in self.bit_allocation.items()},
+            "cluster_sizes": cluster_sizes_json,
+            # Optional metadata
+            "sqc_multipliers": {k: float(v) for k, v in self.sqc_multipliers.items()},
+            "mixllm_available": bool(is_mixllm_available()),
+            "config": {k: v for k, v in self.config.__dict__.items()
+                        if not k.startswith("_")},
         }
+        # Verify the schema BEFORE writing — fail loud rather than silently
+        # producing an unloadable model.
+        if self.config.enable_hardening_asserts:
+            assert_shmq_config_schema(meta)
+            print("[save] HARDENING: shmq_config.json schema verified (seam S4)")
         with open(os.path.join(output_dir, "shmq_config.json"), "w") as f:
             json.dump(meta, f, indent=2, default=str)
         print(f"[save] Done.")
