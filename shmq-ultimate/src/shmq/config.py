@@ -213,11 +213,42 @@ class SHMQConfig:
     use_flash_attention: bool = False
 
     # ------------------------------------------------------------------
+    # FAST_MODE — preset tuned for <4h single-model benchmark on T4 16GB
+    # ------------------------------------------------------------------
+    #: When True, signals to the notebook / benchmark harness that we want
+    #: the fastest-possible single-model run (no SHMQ-paper reproduction,
+    #: no original MixLLM comparison). The actual time savings come from
+    #: the per-knob values below; this flag is just a convenience switch.
+    fast_mode: bool = False
+
+    #: Eval subset sizes — only used when fast_mode=True.
+    #: These are the lm-eval-harness sample caps that bring the total
+    #: evaluation time under 80 minutes on T4.
+    fast_mode_mmlu_subjects: int = 5       # full MMLU = 57 subjects
+    fast_mode_mmlu_samples_per_subject: int = 400
+    fast_mode_hellaswag_samples: int = 2000
+    fast_mode_arc_samples: int = 1000
+    fast_mode_winogrande_samples: int = 1000
+
+    # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
     def __post_init__(self):
         assert self.inter_layer_hessian in ("fisher", "pyhessian"), \
             f"inter_layer_hessian must be 'fisher' or 'pyhessian', got {self.inter_layer_hessian}"
+        if self.fast_mode:
+            # FAST_MODE overrides: faster sensitivity + fewer AutoRound iters
+            # We apply these in __post_init__ so they're visible to all steps.
+            if self.inter_layer_hessian != "fisher":
+                print(f"[FAST_MODE] Forcing inter_layer_hessian='fisher' (was {self.inter_layer_hessian})")
+                object.__setattr__(self, "inter_layer_hessian", "fisher")
+            if self.autoround_iters > 100:
+                print(f"[FAST_MODE] Reducing autoround_iters 200 -> 100 (was {self.autoround_iters})")
+                object.__setattr__(self, "autoround_iters", 100)
+                object.__setattr__(self, "autoround_lr", 1.0 / 100)
+            if self.n_samples > 64:
+                print(f"[FAST_MODE] Reducing n_samples 128 -> 64 (was {self.n_samples})")
+                object.__setattr__(self, "n_samples", 64)
         assert set(self.bit_levels).issubset({4, 8, 16}), \
             f"bit_levels must be subset of {{4, 8, 16}}, got {self.bit_levels}"
         if self.use_3level_ilp:
