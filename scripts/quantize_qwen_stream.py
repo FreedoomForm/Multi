@@ -100,7 +100,9 @@ class StreamWriter:
         self.f.close()
 
 
-def st_dtype(t: torch.dtype) -> str:
+def st_dtype(t) -> str:
+    if isinstance(t, str):          # safetensors slice.get_dtype() -> 'BF16'
+        return t
     return {torch.float32: "F32", torch.float16: "F16", torch.bfloat16: "BF16",
             torch.int8: "I8", torch.uint8: "U8", torch.int32: "I32",
             torch.int64: "I64"}[t]
