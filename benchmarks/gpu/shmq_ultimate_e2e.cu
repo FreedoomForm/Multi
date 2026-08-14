@@ -19,6 +19,7 @@
  */
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cmath>
 #include <vector>
 #include <cuda_fp16.h>
