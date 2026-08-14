@@ -402,59 +402,94 @@ class SHMQMixLLMLinear(nn.Module):
         """Build the SHMQ 3-level fused kernel wrapper.
 
         Pulls the quantized weights from the MixLLM wrapper (or fallback buffers)
-        and feeds them into SHMQ3LevelKernel. If cupy is unavailable or kernel
-        compilation fails, this is a no-op and forward() falls back to the
-        MixLLM/PyTorch path.
+        and feeds them into SHMQ3LevelKernel. The new kernel (cupy.RawKernel
+        + NVRTC for T4 sm_75) takes:
+            W16: (N16, K) FP16
+            W8:  (N8,  K) INT8
+            W4:  (N4,  K/2) UINT8  (packed INT4, lower nibble = even idx)
+            S8:  (N8,  K/128) FP16  (per-output-channel, per-group-of-128)
+            S4:  (N4,  K/128) FP16
+
+        MixLLM stores scales transposed (n_groups, n_out), so we transpose
+        to match our kernel's (n_out, n_groups) layout. MixLLM stores INT4
+        already packed as uint8 — we pass it through directly without
+        unpacking (the kernel does unpacking in registers).
+
+        If cupy is unavailable or kernel compilation fails, this is a no-op
+        and forward() falls back to the MixLLM/PyTorch path.
         """
         from ..inference.shmq_3level_kernel import SHMQ3LevelKernel
 
-        W16 = self.weight_fp16 if self.n_fp16 > 0 else None
+        # ---- FP16 path ----
+        W16 = self.weight_fp16 if (self.n_fp16 > 0 and self.weight_fp16.numel() > 0) else None
+
+        # ---- INT8 path ----
         W8 = None
         S8 = None
-        W4 = None
-        S4 = None
-
         if self.n_int8 > 0:
-            if self.weight_int8 is not None:
-                # MixLLM packed format: weight_int8 (n_int8, n_in) int8
-                #                       weight_scale_int8 (n_groups, n_int8) fp16
+            if self.weight_int8 is not None and self.weight_int8.numel() > 0:
+                # MixLLM format: weight_int8 (n_int8, n_in) int8
                 W8 = self.weight_int8.to(torch.int8).contiguous()
-                # Transpose scale to (n_int8, n_groups)
-                S8 = self.weight_scale_int8.t().contiguous().to(torch.float16) \
-                    if hasattr(self, "weight_scale_int8") and self.weight_scale_int8 is not None \
-                    else None
+                # MixLLM scale shape (n_groups, n_int8) -> kernel expects (n_int8, n_groups)
+                S8 = self.weight_scale_int8.t().contiguous().to(torch.float16)
             elif self._fallback_int8_weight is not None:
-                W8 = self._fallback_int8_weight
-                S8 = self._fallback_int8_scale
+                # Fallback stores unpacked FP16 — re-quantize to INT8 here.
+                from ..inference.weight_packing import _symmetric_quantize_int
+                W8, S8 = _symmetric_quantize_int(
+                    self._fallback_int8_weight.to(torch.float16),
+                    n_bits=8, group_size=self.cfg.group_size,
+                )
+                W8 = W8.contiguous()
+                S8 = S8.contiguous().to(torch.float16)
 
+        # ---- INT4 path ----
+        # Pass the packed uint8 directly to the kernel — it unpacks in registers.
+        W4_packed = None
+        S4 = None
         if self.n_int4 > 0:
-            if self.weight_int4 is not None:
-                # MixLLM packed INT4: weight_int4 (n_int4, n_in//2) uint8
-                # For our 3-level kernel we need unpacked int8 [N4, K] (simplified).
-                # Unpack here.
-                packed = self.weight_int4  # (n_int4, n_in // 2) uint8
-                if packed is not None and packed.numel() > 0:
-                    n_int4, k_half = packed.shape
-                    K = k_half * 2
-                    unpacked = torch.zeros(n_int4, K, dtype=torch.int8, device=packed.device)
-                    # Lower nibble first
-                    unpacked[:, 0::2] = (packed & 0x0F).to(torch.int8) - 8
-                    unpacked[:, 1::2] = ((packed >> 4) & 0x0F).to(torch.int8) - 8
-                    W4 = unpacked
-                if hasattr(self, "weight_scale_int4") and self.weight_scale_int4 is not None:
+            if self.weight_int4 is not None and self.weight_int4.numel() > 0:
+                # MixLLM format: weight_int4 (n_int4, n_in//2) uint8 — already packed.
+                # Verify packing convention: MixLLM uses (high << 4) | low with
+                # low at even index, high at odd index — matches our kernel.
+                W4_packed = self.weight_int4.to(torch.uint8).contiguous()
+                # MixLLM scale shape (n_groups, n_int4) -> (n_int4, n_groups)
+                if self.weight_scale_int4 is not None and self.weight_scale_int4.numel() > 0:
                     S4 = self.weight_scale_int4.t().contiguous().to(torch.float16)
-                elif self._fallback_int4_scale is not None:
-                    S4 = self._fallback_int4_scale
             elif self._fallback_int4_weight is not None:
-                W4 = self._fallback_int4_weight
-                S4 = self._fallback_int4_scale
+                # Fallback stores unpacked FP16 — pack to INT4 here.
+                from ..inference.weight_packing import _symmetric_quantize_int, pack_int4
+                codes4, S4 = _symmetric_quantize_int(
+                    self._fallback_int4_weight.to(torch.float16),
+                    n_bits=4, group_size=self.cfg.group_size,
+                )
+                W4_packed = pack_int4(codes4).contiguous()
+                S4 = S4.contiguous().to(torch.float16)
 
-        # If no GPU buffers, skip (CPU fallback)
-        if W16 is not None and not W16.is_cuda and (W8 is None or not W8.is_cuda):
-            # Allow CPU construction (will use PyTorch fallback path in forward)
-            pass
-
-        self._shmq_3level_kernel = SHMQ3LevelKernel(W16=W16, W8=W8, W4=W4, S8=S8, S4=S4)
+        # ---- Build the kernel wrapper ----
+        # If everything is on CPU, the kernel will use the PyTorch fallback path
+        # (correctness-only). On CUDA, it will use the cupy.RawKernel.
+        K = self.in_features
+        N = self.out_features
+        try:
+            self._shmq_3level_kernel = SHMQ3LevelKernel(
+                W16=W16,
+                W8=W8,
+                W4_packed=W4_packed,
+                S8=S8,
+                S4=S4,
+                K=K, N=N,
+                N16=self.n_fp16, N8=self.n_int8, N4=self.n_int4,
+                group_size=self.cfg.group_size,
+            )
+            if self._shmq_3level_kernel.is_cuda_native:
+                logger.info(
+                    f"[adapter] SHMQ 3-level fused kernel active: "
+                    f"N16={self.n_fp16}, N8={self.n_int8}, N4={self.n_int4}, "
+                    f"K={K} (single-launch cupy.RawKernel on sm_75+)"
+                )
+        except Exception as e:
+            logger.warning(f"[adapter] Failed to build SHMQ 3-level kernel: {e}")
+            self._shmq_3level_kernel = None
 
     def _forward_mixllm(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Forward through the MixLLM INT8+INT4 path (or PyTorch fallback)."""

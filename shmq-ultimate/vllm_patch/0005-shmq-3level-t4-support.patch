@@ -7,11 +7,18 @@ This patch adds a new vLLM quantization method `shmq_3level` that supports
 3-level mixed-precision weights {FP16, INT8, INT4} in a single Linear layer.
 
 Key features:
-  - Works on T4 (sm_75, Turing) — relaxes min_capability from 80 to 75
-  - Uses cupy.RawKernel for the 3-level fused GEMM (compiled at runtime via NVRTC)
+  - Works on T4 (sm_75, Turing) — relaxes MixLLM's min_capability from 80 to 75
+  - Uses cupy.RawKernel + NVRTC for the 3-level fused GEMM (compiled at runtime)
+  - SINGLE kernel launch for all 3 precision levels (no cuBLAS split for FP16)
+  - PTX MMA wrappers defined for all 3 Turing tensor core types:
+      * mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32  (FP16)
+      * mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32      (INT8)
+      * mma.sync.aligned.m8n8k4.row.col.s32.s4.s4.s32       (INT4)  <-- Turing-specific
+  - CUDA cores path as default (guaranteed correctness); tensor-core path
+    available via -DSHMQ_USE_TENSOR_CORES=1 compile flag
   - Falls back to PyTorch dequant + matmul when cupy is unavailable
   - Compatible with Qwen2 / Qwen2.5 / Llama architectures
-  - Reads quantization config from `shmq_config.json` saved by the SHMQ-Ultimate pipeline
+  - Reads quantization config from `shmq_config.json` saved by SHMQ-Ultimate pipeline
 
 Usage:
   vllm serve Qwen/Qwen2.5-7B-Instruct-SHMQ \\
@@ -34,55 +41,83 @@ The artifact contains:
   - shmq_config.json (per-layer bit-width, permutation, cluster sizes)
   - the standard Qwen2 config.json + tokenizer
 
-This patch is applied ON TOP of MixLLM's vLLM patches 0001-0004.
+This patch is applied ON TOP of MixLLM's vLLM patches 0001-0004 (which add
+the W4.4A8 2-level MixLLM method). Our `shmq_3level` method is independent
+and does not interfere with MixLLM's `mixllm` method.
 ---
- vllm/model_executor/layers/quantization/shmq_3level.py | 350 ++++++++++
- vllm/model_executor/layers/quantization/__init__.py    |   3 +
- 2 files changed, 353 insertions(+)
+ vllm/model_executor/layers/quantization/shmq_3level.py | 480 ++++++++++
+ vllm/model_executor/layers/quantization/__init__.py    |   5 +
+ 2 files changed, 485 insertions(+)
  create mode 100644 vllm/model_executor/layers/quantization/shmq_3level.py
 
 diff --git a/vllm/model_executor/layers/quantization/__init__.py b/vllm/model_executor/layers/quantization/__init__.py
 index 0000000..1111111
 --- a/vllm/model_executor/layers/quantization/__init__.py
 +++ b/vllm/model_executor/layers/quantization/__init__.py
-@@ -0,0 +1,3 @@
+@@ -0,0 +1,5 @@
++# SHMQ-Ultimate 3-level {FP16, INT8, INT4} quantization (T4 sm_75+)
 +from .shmq_3level import SHMQ3LevelConfig, SHMQ3LevelMethod
 +
++# Re-export for vLLM's quantization registry
 +__all__ = ["SHMQ3LevelConfig", "SHMQ3LevelMethod"]
 diff --git a/vllm/model_executor/layers/quantization/shmq_3level.py b/vllm/model_executor/layers/quantization/shmq_3level.py
 new file mode 100644
 index 0000000..2222222
 --- /dev/null
 +++ b/vllm/model_executor/layers/quantization/shmq_3level.py
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,480 @@
 +"""SHMQ 3-level {FP16, INT8, INT4} quantization for vLLM.
 +
 +Supports T4 (sm_75) and above. Uses cupy.RawKernel (NVRTC runtime compilation)
-+for the 3-level fused GEMM kernel. Falls back to PyTorch dequant + matmul
++for the 3-level fused GEMM kernel — a SINGLE kernel launch that handles all
++three precision levels natively. Falls back to PyTorch dequant + matmul
 +when cupy is unavailable.
 +
 +Quantization artifact format (`shmq_config.json`):
 +  {
-+    "bit_allocation": {"model.layers.0.self_attn.q_proj": 4, ...},
-+    "permutation":    {"model.layers.0.self_attn.q_proj": [perm_idx, ...], ...},
-+    "cluster_sizes":  {"model.layers.0.self_attn.q_proj": {"16": N16, "8": N8, "4": N4}},
-+    "group_size":     128,
-+    "in_features":    3584,
-+    "out_features":   3584
++    "bit_allocation": {
++      "model.layers.0.self_attn.q_proj": 4,
++      "model.layers.0.self_attn.k_proj": 4,
++      ...
++      "model.layers.0.mlp.gate_proj": 8,
++      ...
++    },
++    "cluster_sizes": {
++      "model.layers.0.self_attn.q_proj": {"16": 192, "8": 768, "4": 2624},
++      ...
++    },
++    "permutation": {
++      "model.layers.0.self_attn.q_proj": [perm_idx, ...],
++      ...
++    },
++    "group_size": 128
 +  }
 +
-+Weights are stored as 3 contiguous blocks in `model.safetensors`:
-+  {layer_name}.weight_fp16  : [N16, K] FP16
-+  {layer_name}.weight_int8  : [N8, K]  INT8
-+  {layer_name}.scale_int8   : [N8, K/128] FP16
-+  {layer_name}.weight_int4  : [N4, K/2] UINT8 (packed)
-+  {layer_name}.scale_int4   : [N4, K/128] FP16
-+  {layer_name}.permutation  : [N] INT64
++Weights are stored as separate tensors per precision level in `model.safetensors`:
++  {layer_name}.weight_fp16  : [N16, K] FP16            (only if N16 > 0)
++  {layer_name}.weight_int8  : [N8,  K] INT8             (only if N8  > 0)
++  {layer_name}.scale_int8   : [N8,  K/128] FP16         (only if N8  > 0)
++  {layer_name}.weight_int4  : [N4,  K/2]  UINT8 packed  (only if N4  > 0)
++  {layer_name}.scale_int4   : [N4,  K/128] FP16         (only if N4  > 0)
++  {layer_name}.permutation  : [N]   INT64               (always present)
++
++The forward pass uses SHMQ3LevelKernel (cupy.RawKernel on T4) which:
++  1. Loads X tile [BM, BK] into shared memory (FP16)
++  2. Loads W tile [BN, BK] into shared memory as FP16, dispatching by global n:
++     - FP16 region: direct load
++     - INT8 region: load + dequant with per-group scale
++     - INT4 region: load packed + unpack + dequant with per-group scale
++  3. Computes partial dot products (CUDA cores by default; PTX MMA available)
++  4. Accumulates into FP32, casts to FP16 for output
++
++All 3 paths share the SAME kernel launch — no cuBLAS split for FP16.
 +"""
 +from __future__ import annotations
 +import json
 +import os
-+from typing import Any, Dict, List, Optional
++import sys
++import logging
++from typing import Any, Dict, List, Optional, Tuple
 +
 +import torch
 +import torch.nn as nn
@@ -92,16 +127,168 @@ index 0000000..2222222
 +    QuantizationConfig,
 +    LinearMethodBase,
 +)
-+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 +
++logger = logging.getLogger(__name__)
++
++
++# ---------------------------------------------------------------------------
++# Lazy import of the SHMQ3LevelKernel from the shmq package.
++#
++# We try several paths:
++#   1. If `shmq` is pip-installed (or on PYTHONPATH), import directly.
++#   2. If SHMQ_PKG_PATH env var is set, add it to sys.path and import.
++#   3. Look for a sibling `shmq/` directory relative to this file.
++#   4. Fall back to a stub that uses PyTorch only (correctness, slow).
++# ---------------------------------------------------------------------------
++_SHMQ_KERNEL_CLS = None
++
++
++def _get_shmq_kernel_cls():
++    """Lazy import of SHMQ3LevelKernel. Cached."""
++    global _SHMQ_KERNEL_CLS
++    if _SHMQ_KERNEL_CLS is not None:
++        return _SHMQ_KERNEL_CLS
++
++    # Try 1: direct import
++    try:
++        from shmq.inference.shmq_3level_kernel import SHMQ3LevelKernel
++        _SHMQ_KERNEL_CLS = SHMQ3LevelKernel
++        logger.info("[shmq_3level] Loaded SHMQ3LevelKernel from shmq package")
++        return _SHMQ_KERNEL_CLS
++    except ImportError:
++        pass
++
++    # Try 2: SHMQ_PKG_PATH env var
++    pkg_path = os.environ.get("SHMQ_PKG_PATH", "")
++    if pkg_path and pkg_path not in sys.path:
++        sys.path.insert(0, pkg_path)
++    try:
++        from shmq.inference.shmq_3level_kernel import SHMQ3LevelKernel
++        _SHMQ_KERNEL_CLS = SHMQ3LevelKernel
++        logger.info(f"[shmq_3level] Loaded SHMQ3LevelKernel from SHMQ_PKG_PATH={pkg_path}")
++        return _SHMQ_KERNEL_CLS
++    except ImportError:
++        pass
++
++    # Try 3: sibling shmq/ directory (for dev installs)
++    here = os.path.dirname(os.path.abspath(__file__))
++    candidates = [
++        os.path.join(here, "..", "..", "..", "..", "shmq"),
++        os.path.join(here, "..", "..", "..", "..", "..", "shmq-ultimate", "src", "shmq"),
++        "/home/z/my-project/shmq-ultimate/src/shmq",
++    ]
++    for c in candidates:
++        c = os.path.abspath(c)
++        parent = os.path.dirname(c)
++        if os.path.isdir(c) and parent not in sys.path:
++            sys.path.insert(0, parent)
++            try:
++                from shmq.inference.shmq_3level_kernel import SHMQ3LevelKernel
++                _SHMQ_KERNEL_CLS = SHMQ3LevelKernel
++                logger.info(f"[shmq_3level] Loaded SHMQ3LevelKernel from {parent}")
++                return _SHMQ_KERNEL_CLS
++            except ImportError:
++                sys.path.pop(0)
++
++    # Try 4: stub
++    logger.warning(
++        "[shmq_3level] Could not import SHMQ3LevelKernel; "
++ "using PyTorch-only stub (correctness, ~10-50x slower)"
++    )
++    _SHMQ_KERNEL_CLS = _PyTorchStubKernel
++    return _SHMQ_KERNEL_CLS
++
++
++class _PyTorchStubKernel:
++    """Pure-PyTorch stub used when the real cupy.RawKernel is unavailable.
++
++    Computes Y = X @ [W16; W8; W4].T using FP32 accumulation. Same interface
++    as SHMQ3LevelKernel so it can be a drop-in replacement.
++    """
++
++    def __init__(self, W16=None, W8=None, W4_packed=None, S8=None, S4=None,
++                 K=0, N=0, N16=0, N8=0, N4=0, group_size=128):
++        self.W16 = W16
++        self.W8 = W8
++        self.W4_packed = W4_packed
++        self.S8 = S8
++        self.S4 = S4
++        self.K = K
++        self.N = N
++        self.N16 = N16
++        self.N8 = N8
++        self.N4 = N4
++        self.group_size = group_size
++
++    @property
++    def is_cuda_native(self) -> bool:
++        return False
++
++    def to(self, device):
++        return _PyTorchStubKernel(
++            W16=None if self.W16 is None else self.W16.to(device),
++            W8=None if self.W8 is None else self.W8.to(device),
++            W4_packed=None if self.W4_packed is None else self.W4_packed.to(device),
++            S8=None if self.S8 is None else self.S8.to(device),
++            S4=None if self.S4 is None else self.S4.to(device),
++            K=self.K, N=self.N, N16=self.N16, N8=self.N8, N4=self.N4,
++            group_size=self.group_size,
++        )
++
++    def forward(self, X: torch.Tensor) -> torch.Tensor:
++        leading = X.shape[:-1]
++        X2d = X.reshape(-1, self.K).to(torch.float16)
++        M = X2d.shape[0]
++        Xf = X2d.float()
++        Y = torch.zeros(M, self.N, dtype=torch.float16, device=X.device)
++
++        if self.N16 > 0 and self.W16 is not None:
++            Y[:, :self.N16] = (Xf @ self.W16.float().T).to(torch.float16)
++
++        if self.N8 > 0 and self.W8 is not None and self.S8 is not None:
++            n_groups = self.K // self.group_size
++            W8_dq = (self.W8.float()
++                     .reshape(self.N8, n_groups, self.group_size)
++                     * self.S8.float().unsqueeze(-1))
++            W8_dq = W8_dq.reshape(self.N8, self.K)
++            Y[:, self.N16:self.N16 + self.N8] = (Xf @ W8_dq.T).to(torch.float16)
++
++        if self.N4 > 0 and self.W4_packed is not None and self.S4 is not None:
++            n_groups = self.K // self.group_size
++            packed = self.W4_packed
++            even = ((packed >> 4) & 0x0F).to(torch.int16)
++            odd = (packed & 0x0F).to(torch.int16)
++            even = torch.where(even >= 8, even - 16, even)
++            odd = torch.where(odd >= 8, odd - 16, odd)
++            W4_int8 = torch.stack([even, odd], dim=-1).flatten(start_dim=1).to(torch.int8)
++            W4_dq = (W4_int8.float()
++                     .reshape(self.N4, n_groups, self.group_size)
++                     * self.S4.float().unsqueeze(-1))
++            W4_dq = W4_dq.reshape(self.N4, self.K)
++            Y[:, self.N16 + self.N8:] = (Xf @ W4_dq.T).to(torch.float16)
++
++        return Y.reshape(*leading, self.N)
++
++
++# ---------------------------------------------------------------------------
++# vLLM quantization config
++# ---------------------------------------------------------------------------
 +
 +class SHMQ3LevelConfig(QuantizationConfig):
-+    """vLLM quantization config for SHMQ 3-level {4,8,16}."""
++    """vLLM quantization config for SHMQ 3-level {4, 8, 16}.
 +
-+    def __init__(self, group_size: int = 128):
++    Reads `shmq_config.json` from the model directory to obtain per-layer
++    bit allocations, cluster sizes, and permutations.
++    """
++
++    def __init__(self, group_size: int = 128,
++                 bit_allocation: Optional[Dict[str, int]] = None,
++                 cluster_sizes: Optional[Dict[str, Dict[int, int]]] = None,
++                 permutations: Optional[Dict[str, List[int]]] = None):
 +        self.group_size = group_size
-+        # Loaded lazily from shmq_config.json during create_param
-+        self.shmq_config: Dict[str, Any] = {}
++        self.bit_allocation = bit_allocation or {}
++        self.cluster_sizes = cluster_sizes or {}
++        self.permutations = permutations or {}
 +
 +    @classmethod
 +    def get_name(cls) -> str:
@@ -109,11 +296,12 @@ index 0000000..2222222
 +
 +    @classmethod
 +    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-+        return [torch.float16, torch.bfloat16]
++        # Activations stay FP16 (no per-token INT8 quant for 3-level path)
++        return [torch.float16]
 +
 +    @classmethod
 +    def get_min_capability(cls) -> int:
-+        # T4 (sm_75) supported. This is the key difference from MixLLM (min 80).
++        # T4 (sm_75) supported — key difference from MixLLM (min 80)
 +        return 75
 +
 +    @classmethod
@@ -122,33 +310,75 @@ index 0000000..2222222
 +
 +    @classmethod
 +    def from_config(cls, config: Dict[str, Any]) -> "SHMQ3LevelConfig":
-+        group_size = config.get("group_size", 128)
-+        return cls(group_size=group_size)
++        group_size = int(config.get("group_size", 128))
++        bit_allocation = {k: int(v) for k, v in config.get("bit_allocation", {}).items()}
++        cluster_sizes_raw = config.get("cluster_sizes", {})
++        cluster_sizes = {}
++        for layer_name, cs_dict in cluster_sizes_raw.items():
++            cluster_sizes[layer_name] = {int(k): int(v) for k, v in cs_dict.items()}
++        permutations = {k: list(v) for k, v in config.get("permutation", {}).items()}
++        return cls(
++            group_size=group_size,
++            bit_allocation=bit_allocation,
++            cluster_sizes=cluster_sizes,
++            permutations=permutations,
++        )
 +
 +    def get_quant_method(
 +        self, layer: nn.Module, prefix: str
 +    ) -> Optional[LinearMethodBase]:
 +        if isinstance(layer, LinearBase):
-+            return SHMQ3LevelMethod(self)
++            return SHMQ3LevelMethod(self, prefix)
 +        return None
 +
 +    def get_scaled_act_namespace(self) -> List[str]:
 +        return []
 +
 +
++# ---------------------------------------------------------------------------
++# vLLM linear method
++# ---------------------------------------------------------------------------
++
 +class SHMQ3LevelMethod(UnquantizedLinearMethod):
 +    """Linear method that loads SHMQ 3-level weights and dispatches to
 +    SHMQ3LevelKernel for the forward pass.
 +
 +    On T4 (sm_75), the SHMQ3LevelKernel uses cupy.RawKernel with NVRTC
-+    compilation. On A100/H100, it can fall back to MixLLM's native kernel
-+    if available.
++    compilation (Turing PTX mma.sync m8n8k4 for INT4 tensor cores).
++    On A100/H100, it can use the same kernel (PTX is forward-compatible)
++    or fall back to PyTorch if cupy is unavailable.
 +    """
 +
-+    def __init__(self, config: SHMQ3LevelConfig):
++    def __init__(self, config: SHMQ3LevelConfig, prefix: str = ""):
 +        super().__init__()
 +        self.config = config
-+        self._kernel = None  # lazily initialized
++        self.prefix = prefix
++        self._kernel = None  # lazily initialized in process_weights_after_loading
++
++    def _get_cluster_sizes_for_layer(self, output_size: int) -> Tuple[int, int, int]:
++        """Look up cluster sizes (N16, N8, N4) for this layer from config.
++
++        Falls back to all-FP16 if no entry found (safety).
++        """
++        cs = self.config.cluster_sizes.get(self.prefix)
++        if cs is None:
++            # Try without the trailing .weight or .q_proj etc.
++            for key in self.config.cluster_sizes:
++                if self.prefix.startswith(key) or key.startswith(self.prefix):
++                    cs = self.config.cluster_sizes[key]
++                    break
++        if cs is None:
++            logger.warning(
++                f"[shmq_3level] No cluster_sizes entry for {self.prefix}; "
++                f"defaulting to all-FP16"
++            )
++            return (output_size, 0, 0)
++        n16 = cs.get(16, 0)
++        n8 = cs.get(8, 0)
++        n4 = cs.get(4, 0)
++        assert n16 + n8 + n4 == output_size, \
++            f"Cluster sizes {n16}+{n8}+{n4} != output_size {output_size} for {self.prefix}"
++        return (n16, n8, n4)
 +
 +    def create_weights(
 +        self,
@@ -160,59 +390,62 @@ index 0000000..2222222
 +        params_dtype: torch.dtype,
 +        **extra_weight_attrs,
 +    ):
-+        # output_partition_sizes: e.g. [3584] for a single q_proj, or [3584] for
-+        # gate_proj + up_proj fused. We treat the whole output dim as one block.
 +        output_size_per_partition = sum(output_partition_sizes)
-+        n_groups = input_size_per_partition // self.config.group_size
++        K = input_size_per_partition
++        n_groups = K // self.config.group_size
 +
-+        # Allocate buffers for all 3 paths (some may be empty)
-+        # We don't yet know the split — that comes from shmq_config.json,
-+        # which is loaded in process_weights_after_loading().
++        # Determine cluster sizes from config
++        n16, n8, n4 = self._get_cluster_sizes_for_layer(output_size_per_partition)
++
++        # Allocate only the buffers we actually need (saves memory)
 +        weight_fp16 = nn.Parameter(
-+            torch.empty(output_size_per_partition, input_size_per_partition,
-+                        dtype=torch.float16),
++            torch.empty(n16, K, dtype=torch.float16),
 +            requires_grad=False,
-+        )
++        ) if n16 > 0 else None
++
 +        weight_int8 = nn.Parameter(
-+            torch.empty(output_size_per_partition, input_size_per_partition,
-+                        dtype=torch.int8),
++            torch.empty(n8, K, dtype=torch.int8),
 +            requires_grad=False,
-+        )
++        ) if n8 > 0 else None
++
 +        weight_int4_packed = nn.Parameter(
-+            torch.empty(output_size_per_partition, input_size_per_partition // 2,
-+                        dtype=torch.uint8),
++            torch.empty(n4, K // 2, dtype=torch.uint8),
 +            requires_grad=False,
-+        )
++        ) if n4 > 0 else None
++
 +        scale_int8 = nn.Parameter(
-+            torch.empty(output_size_per_partition, n_groups,
-+                        dtype=torch.float16),
++            torch.empty(n8, n_groups, dtype=torch.float16),
 +            requires_grad=False,
-+        )
++        ) if n8 > 0 else None
++
 +        scale_int4 = nn.Parameter(
-+            torch.empty(output_size_per_partition, n_groups,
-+                        dtype=torch.float16),
++            torch.empty(n4, n_groups, dtype=torch.float16),
 +            requires_grad=False,
-+        )
++        ) if n4 > 0 else None
++
 +        permutation = nn.Parameter(
 +            torch.empty(output_size_per_partition, dtype=torch.long),
 +            requires_grad=False,
 +        )
-+        bit_width = nn.Parameter(
-+            torch.empty(output_size_per_partition, dtype=torch.int8),
-+            requires_grad=False,
-+        )
 +
-+        layer.weight_fp16 = weight_fp16
-+        layer.weight_int8 = weight_int8
-+        layer.weight_int4_packed = weight_int4_packed
-+        layer.scale_int8 = scale_int8
-+        layer.scale_int4 = scale_int4
-+        layer.permutation = permutation
-+        layer.bit_width = bit_width
++        # Store on layer
++        layer.shmq_weight_fp16 = weight_fp16
++        layer.shmq_weight_int8 = weight_int8
++        layer.shmq_weight_int4_packed = weight_int4_packed
++        layer.shmq_scale_int8 = scale_int8
++        layer.shmq_scale_int4 = scale_int4
++        layer.shmq_permutation = permutation
++        layer.shmq_n16 = n16
++        layer.shmq_n8 = n8
++        layer.shmq_n4 = n4
++        layer.shmq_K = K
++        layer.shmq_N = output_size_per_partition
 +
++        # Register with vLLM's weight loader
 +        for w in [weight_fp16, weight_int8, weight_int4_packed,
-+                  scale_int8, scale_int4, permutation, bit_width]:
-+            extra_weight_attrs["weight_loader"](w)
++                  scale_int8, scale_int4, permutation]:
++            if w is not None:
++                extra_weight_attrs["weight_loader"](w)
 +
 +    def apply(
 +        self,
@@ -220,65 +453,82 @@ index 0000000..2222222
 +        x: torch.Tensor,
 +        bias: Optional[torch.Tensor] = None,
 +    ) -> torch.Tensor:
-+        # Lazy kernel init
-+        if self._kernel is None:
-+            try:
-+                from vllm.model_executor.layers.quantization.shmq_3level_kernel import (
-+                    SHMQ3LevelKernel,
-+                )
-+            except ImportError:
-+                # Inline kernel module (loaded from ipynb path)
-+                import sys
-+                sys.path.insert(0, os.environ.get("SHMQ_KERNEL_PATH", ""))
-+                from shmq_3level_kernel import SHMQ3LevelKernel
-+            self._kernel = SHMQ3LevelKernel(
-+                W16=layer.weight_fp16 if layer.weight_fp16.numel() > 0 else None,
-+                W8=layer.weight_int8 if layer.weight_int8.numel() > 0 else None,
-+                W4=layer.weight_int4_packed,  # kernel handles packing
-+                S8=layer.scale_int8 if layer.scale_int8.numel() > 0 else None,
-+                S4=layer.scale_int4 if layer.scale_int4.numel() > 0 else None,
-+            )
++        """Forward pass: dispatch to the cached SHMQ3LevelKernel.
 +
-+        y = self._kernel.forward(x)
++        The kernel was initialized in process_weights_after_loading() and
++        is cached on the layer as `layer._shmq_kernel`.
++        """
++        kernel = getattr(layer, "_shmq_kernel", None)
++        if kernel is None:
++            # Fallback: build on-the-fly (shouldn't happen normally)
++            kernel = self._build_kernel_for_layer(layer)
++            layer._shmq_kernel = kernel
++
++        # The kernel computes Y = X @ [W16; W8; W4].T in permuted order.
++        # We need to scatter back to original channel order.
++        y_perm = kernel.forward(x)  # [..., N]
++
++        # Scatter back using permutation
++        perm = layer.shmq_permutation
++        orig_shape = y_perm.shape
++        y_flat = y_perm.reshape(-1, orig_shape[-1])
++        y_original = torch.empty_like(y_flat)
++        y_original[:, perm] = y_flat
++        y = y_original.reshape(orig_shape)
++
 +        if bias is not None:
 +            y = y + bias
 +        return y
 +
++    def _build_kernel_for_layer(self, layer: nn.Module):
++        """Build a SHMQ3LevelKernel for this layer's weights."""
++        SHMQ3LevelKernel = _get_shmq_kernel_cls()
++        kernel = SHMQ3LevelKernel(
++            W16=layer.shmq_weight_fp16,
++            W8=layer.shmq_weight_int8,
++            W4_packed=layer.shmq_weight_int4_packed,
++            S8=layer.shmq_scale_int8,
++            S4=layer.shmq_scale_int4,
++            K=layer.shmq_K,
++            N=layer.shmq_N,
++            N16=layer.shmq_n16,
++            N8=layer.shmq_n8,
++            N4=layer.shmq_n4,
++            group_size=self.config.group_size,
++        )
++        return kernel
++
 +    def process_weights_after_loading(self, layer: nn.Module) -> None:
 +        """Called after all weights are loaded from disk.
 +
-+        Reorders the FP16/INT8/INT4 weights according to the permutation
-+        and partitions them into contiguous blocks.
++        Builds the SHMQ3LevelKernel wrapper around the loaded weights.
++        The weights are already in the correct permuted order (the
++        permutation was applied during quantization, and the saved
++        weights are already partitioned into [FP16 | INT8 | INT4]).
 +        """
-+        perm = layer.permutation.cpu().tolist()
-+        # Count cluster sizes
-+        n16 = sum(1 for b in layer.bit_width.cpu().tolist() if b == 16)
-+        n8 = sum(1 for b in layer.bit_width.cpu().tolist() if b == 8)
-+        n4 = sum(1 for b in layer.bit_width.cpu().tolist() if b == 4)
++        # Move all weight tensors to the layer's device (vLLM handles this
++        # automatically, but we ensure dtypes are correct)
++        if layer.shmq_weight_fp16 is not None:
++            layer.shmq_weight_fp16.data = layer.shmq_weight_fp16.data.to(torch.float16).contiguous()
++        if layer.shmq_weight_int8 is not None:
++            layer.shmq_weight_int8.data = layer.shmq_weight_int8.data.to(torch.int8).contiguous()
++        if layer.shmq_weight_int4_packed is not None:
++            layer.shmq_weight_int4_packed.data = layer.shmq_weight_int4_packed.data.to(torch.uint8).contiguous()
++        if layer.shmq_scale_int8 is not None:
++            layer.shmq_scale_int8.data = layer.shmq_scale_int8.data.to(torch.float16).contiguous()
++        if layer.shmq_scale_int4 is not None:
++            layer.shmq_scale_int4.data = layer.shmq_scale_int4.data.to(torch.float16).contiguous()
++        layer.shmq_permutation.data = layer.shmq_permutation.data.to(torch.long).contiguous()
 +
-+        # Permute all weights to [FP16 block | INT8 block | INT4 block]
-+        # (permutation already encodes this order, so direct gather works)
-+        layer.weight_fp16.data = layer.weight_fp16.data[perm].contiguous()
-+        layer.weight_int8.data = layer.weight_int8.data[perm].contiguous()
-+        layer.weight_int4_packed.data = layer.weight_int4_packed.data[perm].contiguous()
-+        layer.scale_int8.data = layer.scale_int8.data[perm].contiguous()
-+        layer.scale_int4.data = layer.scale_int4.data[perm].contiguous()
++        # Build and cache the kernel
++        layer._shmq_kernel = self._build_kernel_for_layer(layer)
 +
-+        # Zero out non-applicable regions (safety)
-+        if n16 > 0:
-+            layer.weight_int8.data[:n16] = 0
-+            layer.weight_int4_packed.data[:n16] = 0
-+        if n8 > 0:
-+            layer.weight_fp16.data[n16:n16+n8] = 0
-+            layer.weight_int4_packed.data[n16:n16+n8] = 0
-+        if n4 > 0:
-+            layer.weight_fp16.data[n16+n8:] = 0
-+            layer.weight_int8.data[n16+n8:] = 0
++        is_native = getattr(layer._shmq_kernel, "is_cuda_native", False)
++        logger.info(
++            f"[shmq_3level] {self.prefix}: "
++            f"N16={layer.shmq_n16}, N8={layer.shmq_n8}, N4={layer.shmq_n4}, "
++            f"K={layer.shmq_K}, native={'cupy.RawKernel' if is_native else 'PyTorch fallback'}"
++        )
++--
++2.34.1
 +
-+        # Store cluster sizes for apply()
-+        layer.shmq_cluster_sizes = (n16, n8, n4)
-+
-+        # Free the bit_width tensor (no longer needed)
-+        del layer.bit_width
---
-2.34.1
