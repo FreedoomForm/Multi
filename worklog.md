@@ -3840,3 +3840,28 @@ Stage Summary:
   * vLLM patch не применён к реальному vLLM
   * MixLLM CUDA kernel не компилируется в sandbox (нужен setup.py на T4)
   * Partition axis — MixLLM-style (cout), не SHMQ-style (cin)
+
+---
+Task ID: 21 (PUSH)
+Agent: main (Super Z)
+Task: Финальный commit + push результатов аудита (Task ID 20) на GitHub.
+
+Work Log:
+- Подтвердил что все 5 критических багов аудита (Bug A-F) уже закоммичены в коммите d558083.
+- Очистил spurious file-mode изменения (644→755) в 5 подмодулях external/*.
+- Worklog чистый, working tree clean.
+- 6 локальных коммитов опережают origin/main:
+  * d558083 — Audit Task 20: Bug A (INT4 packing), Bug B (ISA drift), Bug C (GQA), Bug D (perm axis), Bug E (cluster sizes), Bug F (stale tests)
+  * ea4f995 — Notebook rebuild (32 cells, 886L)
+  * 6283e69 — Hardening module + 3-level config + pipeline integration
+  * aafb959 — Config additions
+  * 456f6dc — Build script + shmq_3level_kernel.py + MixLLM adapter + vLLM patch 0005
+  * 6bd054e — Research artifacts (research-15/*)
+
+Stage Summary:
+- Аудит завершён: 5 критических багов найдены и исправлены, все CPU-тесты проходят.
+- Известные ограничения для T4 (требуют живого GPU):
+  * cupy.RawKernel CUDA код не запускался на реальном T4
+  * PTX MMA wrappers определены но не вызываются (используется CUDA cores path)
+  * vLLM patch 0005 не применён к реальному vLLM 0.9.0
+- Финальный push на origin/main выполнен.
