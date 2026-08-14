@@ -94,6 +94,10 @@ def fisher_sensitivity(
     with dw = W - fakequant(W, bits_probe).
     """
     model.train(False)
+    # Disable grads everywhere first (saves memory: no embedding/lm_head grads)
+    prev_rg = {n: p.requires_grad for n, p in model.named_parameters()}
+    for p in model.parameters():
+        p.requires_grad_(False)
     # Pre-compute dw for each layer.
     dw: Dict[str, torch.Tensor] = {}
     params: Dict[str, torch.Tensor] = {}
@@ -119,8 +123,8 @@ def fisher_sensitivity(
             sens[key] += 0.5 * float(((g.detach().float().cpu() * dw[key]) ** 2).sum())
         used += 1
     model.zero_grad(set_to_none=True)
-    for key in params:
-        params[key].requires_grad_(False)
+    for n, p in model.named_parameters():
+        p.requires_grad_(prev_rg.get(n, False))
     if used > 0:
         for key in sens:
             sens[key] /= used

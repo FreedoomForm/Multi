@@ -19,7 +19,8 @@ _WIKITEXT_FALLBACK = (
 
 def get_calibration_batches(tokenizer, n_samples: int, seq_len: int,
                             dataset: str = "wikitext2", seed: int = 0,
-                            device: str = "cpu") -> List[torch.Tensor]:
+                            device: str = "cpu",
+                            max_chars: int = 0) -> List[torch.Tensor]:
     rng = random.Random(seed)
     if dataset == "wikitext2":
         try:
@@ -30,6 +31,11 @@ def get_calibration_batches(tokenizer, n_samples: int, seq_len: int,
             text = _WIKITEXT_FALLBACK
     else:
         text = _WIKITEXT_FALLBACK
+
+    # keep at most what we need (~6 chars per token) to bound tokenizer memory
+    need = max_chars or max(n_samples * seq_len * 12, 200_000)
+    if len(text) > need:
+        text = text[:need]
 
     enc = tokenizer(text, return_tensors="pt")
     ids = enc.input_ids[0]
