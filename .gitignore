@@ -1,8 +1,21 @@
-skills/
-node_modules/
-# Large model artifacts — use Git LFS or external storage
-*.safetensors
-*.bin
-*.pt
-*.pth
-shmq-ultimate/download/gpt2_shmq_ultimate/model.safetensors
+# External repos (cloned separately)
+external/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+*.egg
+
+# Quantized model outputs
+quantized_models/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local logs
+*.log
