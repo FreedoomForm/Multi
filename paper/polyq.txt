@@ -1,0 +1,1713 @@
+PolyQ: Codesigning End-to-End Quantization Framework for
+Scalable Edge CPU LLM Inference
+Hyunwoo Oh, Suyeon Jang, Hanning Chen, KyungIn Nam, Sanggeon Yun,
+Ryozo Masukawa, and Mohsen Imani
+University of California, Irvine
+{hyunwooo,m.imani}@uci.edu
+Abstract
+CPUs are the most universal target for on-device LLM inference, but
+existing low-bit quantization methods offer either coarse operating
+points or fine-grained mixed precision that is difficult to execute
+efficiently on CPUs. We present PolyQ, a CPU-oriented compil-
+er/quantization co-design for activation-aware channel-wise bit
+allocation under a user-specified average-bit budget. PolyQ assigns
+per-channel bit-widths from {2, 3, 4, 8, 16}, then uses a compile-
+time model compiler to permute and cluster channels into bit-
+homogeneous blocks, generate SIMD- and LUT-compatible kernels,
+and merge compatible permutations across operators to keep layout
+regularization off the runtime path. This turns fine-grained budget
+fitting into a practical fractional-bit deployment method for CPU-
+only inference. Across Falcon-H1-3B, Llama2-13B, and Qwen3-32B
+on WikiText-2, PolyQ provides stable quality scaling from 3–6 b
+and improves perplexity by 2.4–32.1% over prior methods at a 3 b
+target. End-to-end measurements on three representative CPUs—
+workstation, laptop, and mobile—show that compiler layout regu-
+larization reduces activation reorder traffic by up to 70.8%, prefill
+latency and decode throughput scale nearly proportionally with the
+configured bit budget, and energy/token overhead stays below 2%
+relative to an optimized LUT-based back-end. These results show
+that fractional-bit CPU deployment is practical, predictable, and
+energy-efficient across diverse edge targets.
+1
+Introduction
+Large language models (LLMs) are increasingly expected to run
+on-device—on laptops, edge servers, and embedded controllers [5,
+27, 29, 34]—favoring privacy, low latency, and cost. CPUs are uni-
+versally present across these targets, operate under tight power and
+cost budgets, and support simple software stacks. Although GPUs
+and accelerators offer excellent peak throughput [28], many edge
+workloads run at batch =1 [12, 32], where parallel compute is under-
+utilized and the deployment advantage over CPUs diminishes [1],
+making CPUs the dependable default.
+Edge deployments face memory constraints more nuanced than a
+single model-size limit: usable memory is fragmented by co-running
+software and shared clients, while weights compete with KV cache,
+activations, and the software stack. Batch =1 inference is domi-
+nated by weight storage and DRAM traffic [2, 10], making coarse
+operating points such as W3 or W4 inefficient—they either leave
+slack unused or overshoot the budget. This makes flexible bud-
+get planning—not just low precision itself—a first-class systems
+requirement.
+Prior PTQ methods reduce model size and memory traffic with-
+out retraining [6, 13, 26], and inter-layer mixed-precision methods
+extend this with coarse budget control [11, 24]. Recent activation-
+aware [14] and intra-layer methods exploit within-layer saliency for
+finer adaptation [9], reordering and compiler methods improve ex-
+ecution efficiency [30, 33], and LUT-based kernels demonstrate effi-
+cient sub-byte execution on CPUs [16, 23, 25]. Despite this progress,
+practical CPU-only edge deployment remains unresolved. Three
+issues are central to this gap:
+1. Deployable fine-grained controllable PTQ method. Inter-
+layer methods [11] limit budget granularity and palette to 2/3/4-bit,
+preventing high-precision protection of activation-salient outlier
+channels and restricting deployable budget range. Intra-layer meth-
+ods [9] offer finer allocation but adopt 𝑏±1-bit entries that only
+support coarse integer-wise budget control and force INT8 dequan-
+tization on CPU-incompatible 5–7-bit entries that forfeit LUT effi-
+ciency due to 2𝑏table scaling, while still lacking the 8/16-bit range
+needed to match the diverse saliency distribution. What is missing
+is a method with a CPU-aligned palette spanning 2–16-bit, enabling
+both saliency-matched allocation and fractional-bit budget control.
+2. Efficient layer-local kernels for heterogeneous low-bit
+blocks. Prior CPU kernels target uniform low-bit configurations [16,
+23, 25], and mixed-precision approaches rely on requantization
+around GEMM [33], introducing conversion and data-movement
+overhead. Translating fine-grained bit assignments into efficient
+heterogeneous low-bit execution on CPUs remains difficult.
+3. Efficient graph-level layout regularization. Local clus-
+tering and reordering [30, 33] reduce within-layer overhead, but
+permutations between adjacent operators reintroduce runtime data
+movement. A compile-time layout-regularization path is needed to
+convert irregular channel-wise bit allocations into bit-homogeneous
+execution blocks without runtime permutation cost.
+These challenges limit the practicality of CPU-only inference and
+motivate a design that jointly addresses flexible budget planning,
+heterogeneous low-bit execution, and low-overhead permutation.
+This paper closes the gap between coarse but deployable inter-
+layer control and fine-grained but execution-unfriendly intra-layer
+mixed precision. We present PolyQ, a CPU-oriented framework
+for deployable activation-aware channel-wise mixed-precision in-
+ference. PolyQ assigns per-channel bit-widths from a CPU-aligned
+{2,3,4,8,16}-bit palette under a user-specified fractional average-bit
+budget based on activation-aware saliency, then regularizes the re-
+sulting layout at compile time through permutation, clustering, and
+layer-specific kernel generation. By propagating compatible permu-
+tations across operators, PolyQ keeps most layout transformations
+off the runtime path. This decouples fine-grained budget adapta-
+tion from regular kernel execution, enabling deployable intra-layer
+mixed precision whose runtime scaling tracks the bit budget.
+The contributions are as follows:
+arXiv:2607.14618v1  [cs.LG]  16 Jul 2026
+
+Hyunwoo Oh, Suyeon Jang, Hanning Chen, KyungIn Nam, Sanggeon Yun,
+Ryozo Masukawa, and Mohsen Imani
+• A deployable channel-wise mixed-precision formulation.
+We propose an intra-layer quantization method over a CPU-
+aligned {2,3,4,8,16}-bit palette, guided by activation-aware saliency,
+enabling saliency-matched bit allocation and fine-grained fractional-
+bit budget adaptation across diverse deployment targets.
+• A compile-time co-design for regular CPU execution. We
+present a compiler that clusters irregular channel-wise bit assign-
+ments into bit-homogeneous blocks, generates matching low-bit
+CPU kernels, and propagates compatible permutations across
+operators to reduce runtime layout overhead.
+• End-to-end validation of budget scalability and efficiency.
+We show that PolyQ improves perplexity by 2.4–32.1% over prior
+methods at a 3b target, realizes fractional budgets within 0.045b of
+target after SIMD-optimized quanta matching, reduces activation
+reorder traffic by up to 70.8% over prior layout policies, and keeps
+end-to-end latency within 5.8% of an optimized LUT backend
+with less than 2% energy/token overhead.
+2
+Background, Related Works, and Motivation
+On-device LLMs on CPUs are typically constrained by weight stor-
+age and DRAM bandwidth. Conventional PTQ reduces this foot-
+print, but the control surface is coarse: one picks a single bit-width
+per layer (e.g., W3 or W4) to fit a memory and latency envelope. This
+works well when deployment budgets align with the low-bit ladder,
+but becomes inefficient for fractional targets such as 3.8 bits/weight.
+This problem is particularly visible when the usable memory region
+is limited, fragmented or tightly bounded by co-running software:
+coarse W3/W4 operating points often either leave too much slack
+or overshoot the envelope.
+Figure 1 illustrates the problem and the opportunity. Assuming
+we assign a 3.9 GB memory budget for Llama3-8B on WikiText-2,
+Figure 1(a) shows that a uniform layer-wise 3-bit point underfills
+the budget and yields worse (higher) perplexity score, whereas
+Figure 1(b) shows that PolyQ allocates bits per channel, reaches near-
+budget fit, and substantially improves perplexity. Figure 1(c) then
+gives the intuition behind this gain: higher precision is concentrated
+on a small set of activation-salient channels, while most channels
+remain low-bit. The lesson is therefore not merely how many bits
+we use on average, but where those bits are spent and how closely
+the resulting footprint matches the target envelope.
+Activation-aware and uniform methods. AWQ [14] shows that
+only a small fraction of salient channels dominate the layer out-
+put and deserve protection, applying activation-aware scaling to
+improve robustness at a fixed nominal bit-width. SmoothQuant [26]
+and related work [7] similarly highlight the importance of activation-
+sensitive error control. However, these methods retain a uniform
+per-layer bit-width: the activation signal identifies where precision
+matters, but does not translate into a flexible budget control method.
+GPTQ [6] achieves strong low-bit compression through second-
+order weight update but likewise targets fixed integer operating
+points with no fractional-budget control.
+Inter-layer mixed-precision methods. HAQ [24] and AMQ [11]
+expose budget control by assigning different bit-widths across lay-
+ers, aligning naturally with efficient execution—one kernel path
+per layer—but the granularity is structurally limited. At layer level,
+Activation
+Weight
+×
+Bit-width target: 3-bit
+Activation
+Weight
+×
+Bit-width target: 3.97-bit
+Model: Llama3-8B, 
+Model Params: 8.03 B, Memory Constraint: 3.9 GB
+4-bit
+3-bit
+8-bit
+Memory Utilization: 3.0 GB / 3.9 GB (77.1%)
+Perplexity Score (↓ is better): 8.099
+Memory Utilization: 3.89 GB/ 3.9 GB (99.8%)
+Perplexity Score (↓ is better): 6.078
+Uniform precision
+Intra-layer Mixed-precision
+(a) Previous Quantization Method
+(b) PolyQ: Better Scalability 
+via Fine-Grained Quantization
+Sorted Channels
+(c) Fine-Grained Saliency-aware Bit Allocation
+Activation-Saliency
+16/8-bit
+Weights
+4-bit
+Weights
+3-bit
+Weights
+2-bit
+Weights
+Figure 1: Budget-fit motivation for fine-grained quantization on CPUs, bench-
+marked on WikiText-2 with Llama3-8B under a 3.9 GB memory budget. Panels
+(a) and (b) visualize channels in activation–weight space and the bit-width
+assigned to them. (a) A conventional uniform-precision scheme targeting
+3 bits/weight leaves substantial headroom (3.0 GB used, 77.1% of the budget)
+and suffers higher perplexity (8.099). (b) PolyQ assigns bits per channel and
+achieves 3.97 bits/weight by mixing 2/3/4/8/16-bit channels, using nearly the
+full budget (3.89 GB, 99.8%) and significantly reducing perplexity (6.078). (c)
+A schematic view of the same allocation principle: after channels are sorted
+by activation saliency, higher precision is reserved for a small salient subset
+while most channels remain at lower precision.
+protecting a salient subset requires elevating the entire layer’s preci-
+sion, which is wasteful, and a 2/3/4-bit palette ceiling means highly
+salient outlier channels cannot be adequately protected without
+overprovisioning the entire layer. Approximating fractional targets
+requires exploring Pareto-efficient layer-wise assignments, which
+is computationally expensive and remains imprecise due to the
+coarse layer-level granularity.
+Intra-layer mixed-precision methods. Slim-LLM [9] pushes to
+channel group-level granularity, exploiting within-layer saliency
+for finer accuracy–memory trade-offs. However, its b±1 palette
+includes 5–7-bit entries that are structurally incompatible with
+LUT-based CPU kernels: LUT sizes scale as 2𝑏, making 5/6/7-bit
+entries require 32/64/128-entry tables that break SIMD efficiency,
+forcing dequantization to INT8 and forfeiting the throughput and
+energy benefits of low-bit execution. This also restricts Slim-LLM
+to coarse integer-bit targets with no fractional-budget control.
+Execution-side: reordering and compiler methods. RPTQ [30]
+shows that fixed channel reordering within a transformer block
+can improve quantization robustness and reduce runtime overhead.
+Atom [33] similarly uses mixed-precision grouping and reordering
+to improve GEMM efficiency at operator boundaries. Both are im-
+portant steps, but they address only local reordering within a fixed
+template: RPTQ applies a block-level fixed permutation, and Atom
+fuses reordering around individual operator boundaries. Neither
+provides a graph-level solution that propagates compatible chan-
+nel bases across the full operator DAG, so permutation overhead
+resurfaces at block and layer boundaries outside the fused region.
+
+PolyQ: Codesigning End-to-End Quantization Framework for Scalable Edge CPU LLM Inference
+DRAM
+Precompute
+LUTs
+Normal/Quantized MAC
+LUT-based MAC
+W{2,3,4}A{8,16,32}
+W{8,16}A{8,16}
+×
++
++
+Output
+int32
+Output
+int32
+SIMD
+Ops
+Activation
+SIMD
+Lookup
+Instr.
+(vqtbl1q,
+vpshufb)
+SIMD
+Ops
+Weight
+Activation
+Weight
+i8/fp16
+i8/fp16
+i2/i3/i4
+i8/fp16
+Mixed-Precision
+Weights
+int3
+int4
+int8
+Gathering is required
+for SIMD parallelism
+Figure 2: Kernel-side barrier for deployable fine-grained quantization on CPUs.
+Conventional low-bit paths assume a uniform per-layer precision and map
+directly to SIMD MAC or LUT-based GEMM kernels with regular packing.
+Channel-wise mixed precision introduces heterogeneous bit-widths across
+channels, creating two execution problems: layer-local blocks must still map to
+real low-bit kernel paths, and cross-operator permutations must not reappear
+as runtime data movement. PolyQ addresses this by clustering channels of
+equal precision, generating layer-specific kernels for the resulting blocks, and
+propagating compatible permutations ahead of time so LUT-based low-bit
+kernels and conventional SIMD paths coexist without sacrificing regularity.
+Beyond palette and granularity limitations, deploying any fine-
+grained bit assignment on CPUs faces a second class of barriers
+on the execution side. As sketched in Figure 2, SIMD arithmetic
+assumes uniform data types across a vector: int8/int16 lanes for con-
+ventional MACs, or fixed sub-byte encodings for LUT-based low-bit
+GEMMs. LUT-based MACs (e.g., 2–4 bit weights implemented via
+table lookups with instructions such as vpshufb or vqtbl1q_u8)
+can be extremely efficient [16, 23, 25], but only when all lanes share
+the same bit-width and packing scheme. This creates a first barrier:
+even after bit assignment is decided, each layer must still be reorga-
+nized into bit-homogeneous blocks that map to actual kernel paths.
+A second barrier appears across operators: if the required permuta-
+tions are materialized between layers, extra unpacking, gather-like
+movement, and repacking quickly erase the benefit. A practical CPU
+solution therefore needs both layer-local heterogeneous kernels
+and graph-level layout regularization.
+PolyQ is designed to resolve this split explicitly. Section 3 han-
+dles the accuracy-side problem by assigning one of several discrete
+bit-widths per channel from a CPU-aligned {2,3,4,8,16}-bit palette
+to meet a user-specified fractional average bit target. Section 4
+handles the execution-side problem by clustering channels into
+bit-homogeneous blocks for layer-local kernels and propagating
+compatible permutations across operators to keep layout overhead
+off the runtime path. This quantization/compiler co-design makes
+fine-grained budget control viable on CPUs: memory footprint and
+For Each Layer
+(a) Activation-aware
+Per-Channel, Per-Bit Error Proxy
+Calibration
+Dataset
+ML Model
+(FP16/32)
+Gb→b'[j] =ΔE/Δb
+E[x1
+2]
+Din
+E[x2
+2]
+E[x3
+2]
+E[x4
+2]
+For Each Layer
+Per-layer
+Channel-wise
+Activation Energy
+Linear
+Layer
+Xl=
+[x1, x2, ...]
+Din
+Dout=1..j
+Xl+1=
+[x1, x2, ...]
+Act.
+Func.
+Channel-wise
+Reconstruction
+Error
+Dout
+Original
+Weight
+b-bit Quantized
+Weight
+For Each Bit Cfg.
+Linear
+Layer
+×
+-
+E3[1...J] E4[1...J] E8[1...J] E16[1...J]
+Din
+Gain
+( Gb→b'[j] )
+1
+2
+3
+4
+Gains of available
+promotions
+3 4 4 3
+E3[1]
+E4[1]
+E4[2]
+E4[3]
+E4[3]
+E8[2]
+E8[3]
+E4[4]
+Bit
+Budget
+Utilization
+G3→4[1]
+G3→4[4]
+G4→8[2]
+G4→8[3]
+ex) target: 5-bit
+Weight
+Channel
+Bit State
+Din
+14/20
+Ch idx ( j )
+4 4 3
+Updated
+Channel
+Bit State
+Din
+Sort,
+Pick (largest G),
+and 
+Apply
+Updated
+Bit Budget
+Utilization
+14+1/20
+4
+Repeat until reaches 
+full bit-budget utilization
+15/20
+(b) Layer-wise Waterfilling
+Under Fractional Bit Budget
+3→4
+4→8
+4→8
+3→4
+(4-3) as 3→4
+Figure 3: PolyQ quantization pipeline at the layer level. (a) From a small cali-
+bration dataset, we run the FP16/FP32 model to collect per-layer, channel-wise
+activation energies E[𝑥2
+𝑗] and, for each linear layer and candidate bit-width
+𝑏∈{2, 3, 4, 8, 16}, compute an activation-aware per-channel reconstruction
+error 𝐸𝑏[𝑗] over input channels (𝐷in). (b) For each layer, we treat bit alloca-
+tion over input channels as a waterfilling problem under a fractional average
+bit budget: starting from an initial bit state (e.g., all 2-bit), we form gains
+𝐺𝑏→𝑏′ [𝑗] = Δ𝐸/Δ𝑏for all possible promotions, sort and apply the highest-
+gain feasible promotions while respecting the bit budget, and repeat until
+the residual budget cannot be used by another discrete promotion, yielding a
+mixed-precision bit state per input channel.
+quality scale smoothly with the fractional bit budget, while runtime
+scaling follows the same budget parameter with modest overhead.
+3
+Poly-Precision Quantization Method
+PolyQ performs per-channel, layer-wise bit allocation at compile
+time under a user-specified fractional average bit budget 𝐵(e.g.,
+𝐵= 3.7 bits/weight). Each input channel of each linear layer is first
+assigned a bit-width from {2, 3, 4, 8, 16} by an idealized waterfilling
+step, and a later ISA-aware snap stage regularizes these counts to
+backend-friendly SIMD/LUT quanta. This yields intra-layer mixed-
+precision weights that closely match a given memory budget while
+preserving accuracy and exposing a regular execution pattern to
+the CPU kernels.
+3.1
+Activation-aware per-channel error proxy
+We use an activation-aware error proxy per input channel, sum-
+marized in Figure 3(a): weight reconstruction error is weighted
+by the empirical activation energy. Consider a linear layer ℓwith
+weight matrix 𝑊(ℓ) ∈R𝑑(ℓ)
+in ×𝑑(ℓ)
+out and a per-channel scale vector
+𝑠(ℓ) ∈R
+𝑑(ℓ)
+in
+>0 obtained from calibration. For a candidate bit-width
+𝑏∈{2, 3, 4, 8, 16} and group size𝑔𝑏, we form a scaled-and-quantized
+
+Hyunwoo Oh, Suyeon Jang, Hanning Chen, KyungIn Nam, Sanggeon Yun,
+Ryozo Masukawa, and Mohsen Imani
+weight
+˜𝑊(ℓ,𝑏) = diag  (𝑠(ℓ))−1 𝑄𝑏
+  diag(𝑠(ℓ))𝑊(ℓ)
+(1)
+where 𝑄𝑏(·) is a symmetric group-wise uniform quantizer with
+𝑏-bit weights using the backend-compatible packing format for
+that precision.
+We approximate the contribution of input channel 𝑗in layer ℓ
+to the squared output error by
+𝐸(ℓ)
+𝑏[𝑗] ≈
+ ˜𝑤(ℓ,𝑏)
+𝑗
+−𝑤(ℓ)
+𝑗
+2
+2
+|              {z              }
+weight reconstruction error
+·
+E
+
+𝑥2
+𝑗
+
+|{z}
+activation energy
+,
+(2)
+where 𝑤(ℓ)
+𝑗
+and ˜𝑤(ℓ,𝑏)
+𝑗
+are the 𝑗-th input-channel rows of 𝑊(ℓ) and
+˜𝑊(ℓ,𝑏), and E[𝑥2
+𝑗] is the second moment of the 𝑗-th input activation
+collected on a small calibration set. Channels whose activations
+have large E[𝑥2
+𝑗] are more salient, and their quantization error
+is penalized more heavily. For 𝑏= 16 we treat the channel as
+unquantized and set 𝐸(ℓ)
+16 [𝑗] = 0. All |{2, 3, 4, 8, 16}| error values
+per channel are computed in a single pass over the weights and
+pre-computed activation statistics, making the proxy evaluation
+lightweight relative to the waterfilling step.
+3.2
+Waterfilling under fractional bit budget
+PolyQ treats each linear layer independently as a discrete resource
+allocation problem under a layer-wise fractional bit budget, as il-
+lustrated in Figure 3(b). For layer ℓwith 𝑑(ℓ)
+in input channels, we
+wish to choose a bit-width 𝑏(ℓ)
+𝑗
+∈{2, 3, 4, 8, 16} for each channel
+𝑗∈{1, . . . ,𝑑(ℓ)
+in } such that
+min
+{𝑏(ℓ)
+𝑗
+}
+1
+𝑑(ℓ)
+in
+𝑑(ℓ)
+in
+∑︁
+𝑗=1
+𝐸(ℓ)
+𝑏(ℓ)
+𝑗
+[𝑗]
+s.t.
+1
+𝑑(ℓ)
+in
+𝑑(ℓ)
+in
+∑︁
+𝑗=1
+𝑏(ℓ)
+𝑗
+= 𝐵
+(3)
+where 𝐵is the user-specified average bit budget shared by all layers
+(e.g., 𝐵= 3.7). In other words, each layer must, on average, use 𝐵
+bits per input channel, but it is free to assign more bits to salient
+channels and fewer bits to unimportant ones.
+We solve Equation 3 by a greedy waterfilling. Let 𝑏min = 2 be
+the minimum bit-width. We initialize all channels in layer ℓto 𝑏min
+consuming 𝑏min 𝑑(ℓ)
+in bits, and compute the remaining bit budget
+Δ(ℓ) = round 𝐵· 𝑑(ℓ)
+in
+ −𝑏min 𝑑(ℓ)
+in
+(4)
+If Δ(ℓ) ≤0, all channels stay at 2 bit. Otherwise, we repeatedly
+upgrade channels by assigning extra bits where they reduce the
+error the most:
+(1) For each channel 𝑗, we consider upgrading it from its current
+bit-width 𝑏to the next higher supported value 𝑏′ ∈{2, 3, 4, 8, 16}
+with 𝑏′ > 𝑏and compute the gain in error per additional bit
+𝐺(ℓ)
+𝑏→𝑏′ [𝑗] =
+𝐸(ℓ)
+𝑏[𝑗] −𝐸(ℓ)
+𝑏′ [𝑗]
+𝑏′ −𝑏
+(5)
+(2) We maintain a max-heap of all candidate upgrades across chan-
+nels in layer ℓ, keyed by 𝐺(ℓ)
+𝑏→𝑏′ [𝑗].
+(3) While Δ(ℓ) > 0 and a feasible upgrade remains, we pop the
+candidate with the largest gain that still matches the current bit-
+width assignment and fits the remaining budget, apply the upgrade
+𝑏→𝑏′, and decrease Δ(ℓ) by (𝑏′ −𝑏). After upgrading channel 𝑗,
+we insert its next possible upgrade (e.g., 4 →8) into the heap.
+This per-layer waterfilling algorithm starts from an aggressively
+quantized configuration and spends additional bits on the channels
+that yield the largest reduction in activation-weighted error per
+extra bit, until the per-layer budget 𝐵is exhausted or no exact
+discrete promotion fits the residual budget. Because each layer may
+have a different saliency pattern, the resulting 2/3/4/8/16-bit mix
+can vary across layers, even though the pre-snap assignment in
+each layer targets the same average bit constraint.
+3.3
+ISA-aware SIMD-quanta matching
+The waterfilling solution above optimizes an ideal per-channel bit
+map, but the execution back-end still requires backend-friendly
+block sizes. Concretely, our current CPU path targets𝑊{2, 3, 4}𝐴16
+LUT-based kernels together with 𝑊{8, 16}𝐴16 SIMD kernels, so
+quanta matching regularizes the weight-channel layout for these
+kernel families. For a target ISA/back-end 𝑡, we therefore associate
+each supported bit-width𝑏with a channel quantum𝑞(𝑡)
+𝑏
+determined
+by the packing format and SIMD microkernel. For example, AVX2
+int8 kernels naturally consume channels in multiples of 32, while
+LUT-based low-bit kernels impose their own per-bit quanta; the
+same abstraction can be retargeted to ARM NEON/SVE or other
+CPU kernels by substituting their backend-specific {𝑞(𝑡)
+𝑏}.
+For layer ℓ, let 𝑐(ℓ)
+𝑏
+be the number of channels assigned to bit-
+width 𝑏by the waterfilling stage. We first round these counts to a
+nearby realizable target
+ˆ𝑐(ℓ)
+𝑏
+≈round
+ 
+𝑐(ℓ)
+𝑏
+𝑞(𝑡)
+𝑏
+!
+𝑞(𝑡)
+𝑏,
+∑︁
+𝑏
+ˆ𝑐(ℓ)
+𝑏
+= 𝑑(ℓ)
+in ,
+(6)
+using small residual corrections to preserve the total number of
+channels. The rounded counts define target block sizes for code
+generation, but leave channel membership to the subsequent error-
+aware reassignment step.
+We apply a second error-aware reassignment step, using equa-
+tion (5). When a higher-precision block needs more channels, we
+promote the channels with the largest activation-aware gain and
+when a block must shrink, we demote the channels with the small-
+est loss under the same criterion. In practice we restrict moves to
+neighboring bit levels and iterate until the per-bit counts match
+{ˆ𝑐(ℓ)
+𝑏}. Thus the snap stage is not a naive padding rule over the raw
+waterfilling map: it explicitly re-optimizes the channel membership
+of each bit block so the final layout is hardware-realizable with
+minimal proxy-error increase.
+After quanta matching, the compiled layer realizes
+𝐵(ℓ)
+real =
+1
+𝑑(ℓ)
+in
+𝑑(ℓ)
+in
+∑︁
+𝑗=1
+˜𝑏(ℓ)
+𝑗,
+(7)
+By combining nearby-count rounding with error-aware channel
+reassignment, PolyQ keeps 𝐵(ℓ)
+real close to the requested 𝐵while
+matching discrete kernel quanta.
+
+PolyQ: Codesigning End-to-End Quantization Framework for Scalable Edge CPU LLM Inference
+3.4
+Bit-specific activation-aware scaling
+After the per-layer bit maps {bits_mapℓ} are fixed by the waterfill-
+ing and quanta matching steps, we apply a bit-specific activation-
+aware scaling. Let 𝑚(ℓ) ∈R
+𝑑(ℓ)
+in
+>0 denote an activation-based saliency
+metric for layer ℓ(we use normalized second moments or mean abso-
+lute activations on the calibration set). For each bit𝑏∈{2, 3, 4, 8, 16},
+we share a single bit-specific exponent 𝛼𝑏∈[0, 1] across all input
+channels in layer ℓthat use bit-width 𝑏, and define
+𝑠(ℓ)
+𝑗
+=  𝑚(ℓ)
+𝑗
+𝛼𝑏
+for 𝑗∈I (ℓ)
+𝑏
+= {𝑗: bits_mapℓ[𝑗] = 𝑏}.
+(8)
+We choose 𝛼𝑏by a small grid search that minimizes the average
+proxy error
+1
+|I(ℓ)
+𝑏
+|
+Í
+𝑗∈I(ℓ)
+𝑏
+𝐸(ℓ)
+𝑏[𝑗]. This yields per-channel scales
+that are still described by a single power law per bit-width, but
+adapted to the poly-precision bit layout. Because each bit group in
+a layer shares a single exponent 𝛼𝑏, the resulting scales are cheap
+to store and easy to fold into the packed weight layout that our
+kernel compiler consumes.
+In our implementation, the final weights are obtained by applying
+standard group-wise symmetric quantization at the assigned bit-
+width per input channel using these scales, and then using the
+resulting packed weights in our CPU kernels.
+4
+Model Compiler Architecture
+Given the per-channel bit maps from section 3, the PolyQ compiler
+transforms irregular channel-wise bit assignments into a static
+profile of permuted, packed weights and layer-specific kernels,
+executable without run-time reconfiguration. Figure 4 summarizes
+the key steps.
+4.1
+Channel permutation and clustering
+For each linear layer with input activations 𝐴and weight matrix𝑊,
+we introduce a channel clustering and permutation matrix 𝑃𝑊that
+reorders input channels so that input channels with the same bit-
+width become contiguous, as shown in Figure 4(a). Conceptually,
+we can factor the linear as
+𝑂= 𝐴×𝑊= (𝐴× 𝑃⊤
+𝑊) × (𝑃𝑊×𝑊),
+(9)
+where 𝑃𝑊×𝑊is a bit-clustered weight with input-channel rows
+made contiguous and 𝐴× 𝑃⊤
+𝑊is the correspondingly permuted
+activation. At compile time we materialize only the clustered weight
+𝑃𝑊×𝑊; the permutation matrix itself is never stored at runtime. The
+same compile-time planner propagates the corresponding channel
+permutations across consecutive linears, explained in Sections 4.3
+and 4.4, so mergeable layers run directly with 𝐴interpreted in this
+permuted basis, and only incompatible graph boundaries pay for
+an explicit activation shuffle.
+4.2
+Bit blocks and kernel assignment
+After the quanta-matching step in section 3, each clustered weight
+matrix decomposes into a small number of bit-homogeneous input-
+channel blocks (2/3/4/8/16 bit). The compiler assigns a kernel per
+block, shown in Figure 4(b). Low-bit blocks use 𝑊{2, 3, 4}𝐴16 LUT-
+based GEMM/GEMV kernels, while higher-precision blocks use
+𝑊{8, 16}𝐴16 OpenBLAS SIMD GEMM [17], since their larger group
+sizes make table-lookup less efficient than direct MAC operations.
+Original A
+Permuted A×PWT
+Original W
+Clustered PW×W
+×
+×
+SIMD-applicable Matrices
+3-bit
+LUT-based
+Kernel
+Subblock
+×
+×
+(b) Kernel Assignment
+4-bit
+LUT-based
+Kernel
+Subblock
+8-bit
+SIMD MAC
+Kernel
+Subblock
+(a) Permutation/Clustering Primitives
+(c) Merging Clustering and Permutation to Avoid Run-time Overhead
+Permuted A×PWT
+Clustered PW×W
+×
+=
+×
+=
+Original
+A
+Original
+W
+Output
+O=A
+Original
+W'
+Output
+O'=A''
+Clustered & Permuted
+(PW×W)×PW'T
+Permuted
+A×PWT
+×
+=
+Output
+O=A'×PW'T
+Clustered & Permuted
+(PW'×W')×PW''T
+×
+=
+Output
+O=A''×PW''T
+×PW'T
+PW×
+×PW''T
+PW'×
+×PWT
+non-
+mergable
+(d) Searching Mergable Path in the LLM
+Former Layer
+Latter Layer
+Q
+Atten
+tion
+σ
+K
+V
+Input
+Embed.
+Linear
+Linear
+Linear
+Linear
+N
+o
+r
+m
+N
+o
+r
+m
+Linear
+Linear
+Self-Attention
+FFN
+Output
+Embed.
+ReLU2,GeLU,
+SiLU,  ...
+Element-wise 
+Activation
+Functions
+Neglibible:
+Permuted order
+is presereved
+Run-time Overheads
+Mergable Paths
+Match A channel by
+permutation
++
+1
+O
+2
+1
++
+1
+3
+1
+1
+4
+4
+4
+Next
+attention
+block's
+n Channel Ordering Indices
+Figure 4: PolyQ model compiler architecture. (a) A channel permutation fac-
+tors 𝑂= 𝐴× 𝑊= (𝐴× 𝑃⊤
+𝑊) × (𝑃𝑊× 𝑊), clustering equal-bit input rows
+without changing the linear output. (b) Clustered input rows are tiled into
+𝑊{2, 3, 4}𝐴16 LUT and𝑊{8, 16}𝐴16 SIMD subblocks. (c) Across adjacent lin-
+ears, a downstream activation shuffle is absorbed into compile-time output/in-
+put weight permutations. (d) A static operator-DAG pass propagates channel
+bases through basis-preserving nodes and inserts shuffles only at incompati-
+ble fan-out, fan-in, or path-boundary edges.
+This produces a fixed sequence of block kernels per linear layer,
+written as C++ functions.
+4.3
+Merging permutations across layers
+Applying 𝑃⊤
+𝑊on activations would introduce run-time overhead.
+The compiler therefore uses a simple merge rule: a downstream
+activation permutation can be eliminated if the upstream producer
+can emit its output in that same channel basis. For two consecutive
+linears with 𝑂= 𝐴×𝑊and 𝑂′ = 𝑂×𝑊′, suppose the second layer
+wants its input in basis 𝑃. Instead of materializing 𝑂× 𝑃⊤at run
+time, the compiler rewrites
+𝑂′ = (𝑂× 𝑃⊤) × (𝑃×𝑊′) = 𝐴× (𝑊× 𝑃⊤) × (𝑃×𝑊′).
+(10)
+Thus the downstream activation permutation is replaced by compile-
+time permutations of the upstream output-channel columns and
+downstream input-channel rows. The intermediate activation is
+
+Hyunwoo Oh, Suyeon Jang, Hanning Chen, KyungIn Nam, Sanggeon Yun,
+Ryozo Masukawa, and Mohsen Imani
+produced directly in the basis required by the downstream layer. Be-
+cause non-linear activation functions such as ReLU/GELU operate
+independently per channel, they commute with channel permuta-
+tions and forward the same basis unchanged. This same rule lets
+the last linear in one region produce the basis required by the first
+linear in the next region, so permutation merging is not limited to
+boundaries inside a single Transformer block.
+4.4
+Graph-based permutation planning
+Rather than hard-coding attention templates, the compiler treats
+the model as a static operator directed acyclic graph (DAG) whose
+edges are activation tensors and whose nodes are linears, normaliza-
+tions, element-wise activations, residual adds, attention operators,
+and reshapes. Each linear node has a preferred input-channel per-
+mutation induced by its snapped bit blocks, while each edge carries
+a current channel basis. The compiler then assigns channel bases
+to DAG edges and forms maximal regions in which the merge rule
+above can be applied without materializing an activation shuffle.
+Equivalently, planning is a finite graph-labeling problem: assign
+a channel-basis label 𝜋𝑒to each activation edge 𝑒, with labels drawn
+from the permutations requested by neighboring mixed-precision
+linears, and reduce the number of edges that require an explicit shuf-
+fle. The local compatibility rules define the cost. Basis-preserving
+operators such as normalization and element-wise activations re-
+quire identical input/output labels, linears can absorb the input label
+into their packed weight and choose an output label by permuting
+output channels at compile time, and fan-in/fan-out/path-boundary
+nodes are zero-cost only when their incident labels agree. Our
+implementation uses topological propagation with local conflict
+resolution: keep the label with the largest downstream reuse and
+insert shuffles only on the remaining boundary edges. This discov-
+ers mergeable paths beyond a single Transformer block, including
+cases where the final FFN linear’s output basis matches the next
+attention block’s first projection.
+5
+Evaluation
+We evaluate PolyQ along four questions: whether a CPU-aligned
+palette improves quality over prior methods at matched budgets,
+whether fractional budgets survive ISA-aware realization and map
+to practical memory footprints, whether compiler layout regulariza-
+tion reduces activation reorder traffic, and whether CPU execution
+remains predictable.
+5.1
+Experimental Setup
+Quantization baselines. We compare PolyQ with AWQ, GPTQ,
+Slim-LLM, and AMQ [6, 9, 11, 14] using group size 128 and FP16
+activations, calibrated on 128 randomly sampled WikiText-2 se-
+quences. Baselines are evaluated at their supported integer-only or
+fractional targets; PolyQ additionally sweeps fractional budgets in
+0.1-bit steps.
+Models and quality metrics. We evaluate Falcon-H1-3B [20],
+Llama2-13B [22], and Qwen3-32B [21] on WikiText-2 [15] perplex-
+ity [6, 14] and capped downstream accuracy on MMLU [8], Wino-
+Grande [18], ARC-Easy/Challenge [3], and HellaSwag [31], with
+question sets fixed across methods and bit budgets. Downstream
+averages are computed over these five tasks.
+4.3
+4.5
+4.7
+4.9
+5.1
+5.3
+5.5
+3
+4
+5
+6
+Perplexity
+Target Bit-width
+5.3
+5.5
+5.7
+5.9
+6.1
+6.3
+3
+4
+5
+6
+Perplexity
+Target Bit-width
+(a) Falcon-H1-3B
+(b) Llama2-13B
+(c) Qwen3-32B
+AWQ
+PolyQ
+GPTQ
+6.7
+6.9
+7.1
+7.3
+7.5
+7.7
+7.9
+3
+4
+5
+6
+Perplexity
+Target Bit-width
+Slim-LLM
+AMQ
+Figure 5: Perplexity vs. target average bit budget for the three models. PolyQ
+sweeps the fractional bit budget from 3.0 b to 6.0 b in 0.1-bit steps, while AWQ,
+GPTQ, and Slim-LLM are evaluated at supported integer targets and AMQ at
+its 3 b, 3.5 b, 4 b Pareto-efficient point within this range.
+Table 1: PolyQ perplexity and bit distribution at a 3-bit target.
+Perplexity (↓is better)
+PolyQ bit dist. (%) at 3 b
+Model
+AWQ
+GPTQ
+Slim-LLM
+AMQ
+PolyQ
+2b
+3b
+4b
+8b
+16b
+Falcon-H1-3B
+5.96
+6.28
+6.15
+–†
+5.82
+6.61
+86.23
+6.92
+0.24
+0.00
+Llama2-13B
+5.29
+5.75
+5.03
+5.68
+4.88
+4.08
+92.33
+3.42
+0.16
+0.01
+Qwen3-32B
+8.23
+10.75
+10.00
+11.29
+7.66
+11.93
+77.82
+9.68
+0.56
+0.01
+†AMQ currently does not support Falcon-H1-3B’s hybrid attention architecture.
+CPU execution setup. We measure end-to-end execution on
+Ryzen 9 9950X, Ryzen 7 7840U, and Intel N250 (workstation, laptop,
+and mobile, 16/8/4 cores) running Ubuntu 24.04. Energy/token is
+measured via RAPL [4] OS module. PolyQ dispatches𝑊{2, 3, 4}𝐴16
+blocks to T-MAC [25] and 𝑊{8, 16}𝐴16 blocks to OpenBLAS SIMD
+GEMM [17]. Runtime comparison uses uniformly quantized AWQ
+weights on the same T-MAC path at 2-, 3-, and 4-bit.
+5.2
+Accuracy and Low-Bit Budget Recovery
+Fractional-bit quality analysis. Figure 5 shows perplexity as a
+function of the target average bit budget. PolyQ exposes a dense
+fractional ladder from 3.0 b to 6.0 b in 0.1-bit steps, while AWQ,
+GPTQ, and Slim-LLM provide coarse integer reference points and
+AMQ presents few Pareto-efficient points. Across all three models,
+increasing 𝐵improves perplexity smoothly with only small local
+fluctuations, and higher-precision PolyQ points converge to the cor-
+responding integer-baseline quality. At 5–6 b, all methods produce
+similar perplexity, consistent with channels naturally settling near
+their target precision regardless of palette choice; Slim-LLM’s mar-
+ginal advantage at these budgets is consistent with its b±1 palette
+providing finer intermediate steps between 4 and 8 bit, though the
+gap is within 0.01–0.03 perplexity. The meaningful differentiation
+occurs at tight budgets: at 3 b, PolyQ outperforms AWQ by 2.4–
+7.8%, GPTQ by 7.4–28.7%, Slim-LLM by 3.0–23.4%, and AMQ by
+14.1–32.1%, where channel-level granularity and a CPU-aligned
+palette spanning 2–16-bit matter most. We use 3.0–6.0 b as the sta-
+ble operating window and analyze the 2.x low-bit floor separately
+below.
+Standard 3-bit operating point. Table 1 details the bit distribution
+at the 3-bit target. Most channels remain in the 2–4 b range, while
+only small fractions are promoted to 8/16 b where the activation-
+aware proxy marks them as salient, keeping the realized average
+within 0.016 b of the target.
+Extreme low-bit transition. Table 2 highlights why fractional
+precision is most valuable near the low-bit floor. At this end of the
+
+PolyQ: Codesigning End-to-End Quantization Framework for Scalable Edge CPU LLM Inference
+Table 2: Low-bit recovery threshold and cost of uniform W3 fallback. 𝐵min is
+the first swept point after the collapse-to-recovery transition; W3 overhead is
+computed as 3/𝐵min −1.
+Model
+Collapse point (𝐵/PPL)
+Recovery point (𝐵min/PPL)
+W3 overhead
+Falcon-H1-3B
+2.0 / 2.0×107
+2.1 / 8.67
+42.9%
+Llama2-13B
+2.5 / 44.78
+2.6 / 5.96
+15.4%
+Qwen3-32B
+2.1 / 1.4×105
+2.2 / 11.39
+36.4%
+21
+41
+61
+81
+2
+3
+4
+5
+6
+Accuracy (%)
+Target Bit-width
+20
+25
+30
+35
+40
+2
+3
+4
+5
+6
+Accuracy (%)
+Target Bit-width
+45
+50
+55
+60
+65
+2
+3
+4
+5
+6
+Accuracy (%)
+Target Bit-width
+22
+32
+42
+52
+2
+3
+4
+5
+6
+Accuracy (%)
+Target Bit-width
+28
+33
+38
+43
+48
+53
+58
+2
+3
+4
+5
+6
+Accuracy (%)
+Target Bit-width
+AWQ (Int. B)
+PolyQ
+GPTQ (Int. B)
+(a) Average
+FP16
+(b) MMLU
+(c) WinoGrande
+(d) ARC Easy
+(e) ARC Challenge
+(f) HellaSwag
+21
+31
+41
+51
+61
+2
+3
+4
+5
+6
+Accuracy (%)
+Target Bit-width
+Slim-LLM (Int. B)
+AMQ
+Figure 6: Capped downstream multiple-choice accuracy vs. target bit budget.
+PolyQ is plotted as a fractional-budget curve; AWQ, GPTQ, and Slim-LLM are
+integer-budget markers, and AMQ is plotted at its evaluated Pareto points.
+design space, integer precision steps are coarse: moving from W2
+to W3 increases weight storage by 50%. PolyQ identifies model-
+specific recovery points 𝐵𝑚𝑖𝑛(defined in Table 2), the first fractional
+operating point past the W2 collapse where perplexity recovers to a
+usable regime, avoiding both collapsed W2-like quality and overpro-
+visioned W3 memory. These 𝐵𝑚𝑖𝑛result in 1.47 GiB, 4.98 GiB, and
+11.29 GiB estimated peak footprints for Falcon-H1-3B, Llama2-13B,
+and Qwen3-32B, respectively. Compared with the same-backend
+W3 footprint, this leaves 17.1%, 11.6%, and 21.8% less peak memory
+at the first recovered operating point, which is memory that cannot
+be reclaimed in an integer-only deployment.
+Downstream task behavior. Figure 6 shows that, in this capped
+evaluation, downstream results follow the same low-bit recovery
+region as perplexity. We detail Llama2-13B as it shows the sharpest
+low-bit recovery transition; Qwen3-32B and Falcon-H1-3B follow
+with briefer summaries. For Llama2-13B, the five-task average rises
+from 41.3 at 𝐵=2.5 to 52.0 at 𝐵=2.6, matching the perplexity drop
+from 44.78 to 5.96. This recovery is broad rather than driven by
+a single benchmark: MMLU, ARC-Easy, ARC-Challenge, and Hel-
+laSwag improve by 11.7, 16.0, 9.4, and 16.0 percentage points, while
+WinoGrande remains stable. By 𝐵=2.9, Llama2-13B reaches a 54.1
+five-task average, above AMQ-3 at 49.8, AWQ-3 at 51.8, and Slim-
+LLM-3 at 53.8, while still using a sub-3-bit target. For Qwen3-32B,
+the average rises from 32.0 at 𝐵=2.1 to 38.8 at 𝐵=2.2, and reaches
+44.1 at 𝐵=3.0, slightly above the AWQ-3 marker at 43.2. The Qwen3-
+32B transition is more uneven across tasks, but the large gains on
+HellaSwag and WinoGrande show the same recovery of task utility
+once the collapsed low-bit region is crossed. Falcon-H1-3B stays
+in the same accuracy band as FP16 and integer baselines across
+3
+4
+5
+6
+3.0
+4.0
+5.0
+6.0
+Realized B0 (b)
+(a) Falcon-H1-3B
+3
+4
+5
+6
+3.0
+4.0
+5.0
+6.0
+(b) Llama2-13B
+3
+4
+5
+6
+3.0
+4.0
+5.0
+6.0
+(c) Qwen3-32B
+0.0
+0.5
+1.0
+Error (%)
+Target Budget B (b)
+Realized B0
+Ideal B0 = B
+|B0 −B|/B
+Figure 7: Budget realization after ISA-aware quanta matching from 3.0 to
+6.0 target bits. Markers show realized average precision 𝐵′ after snapping to
+backend-friendly SIMD/LUT quanta, the dashed line is the ideal 𝐵′=𝐵target,
+and the secondary axis reports relative mismatch.
+2
+3
+4
+1.6
+1.8
+2.0
+Peak memory (GiB)
+(a) Falcon-H1-3B
+2
+3
+4
+4
+5
+6
+7
+(b) Llama2-13B
+2
+3
+4
+12
+14
+16
+(c) Qwen3-32B
+Target bits
+PolyQ
+AWQ(T-MAC) (2/3/4 only)
+Figure 8: Peak memory footprint on the three models under fixed batch =1. The
+footprint model combines quantized storage with KV cache, live activations,
+backend scratch, and layout metadata. PolyQ exposes 0.1-bit control from 2.0
+to 4.0 bits, while AWQ(T-MAC) moves only in coarse 2/3/4-bit steps.
+4–5 b, and downstream curves across all models show small non-
+monotonic variations after the recovery point, consistent with the
+sensitivity of discrete benchmark metrics to evaluation scale [19].
+5.3
+Budget Realization and Peak Footprint
+ISA/Kernel-aware quanta matching. PolyQ preserves the re-
+quested target average bit budget after snapping mixed-precision
+channel counts to SIMD/LUT-friendly quanta. Figure 7 confirms
+this holds across the 3.0–6.0 b sweep: the maximum observed mis-
+match is only 0.045 b on Falcon-H1-3B, 0.031 b on Llama2-13B, and
+0.016 b on Qwen3-32B, staying within 0.016 b and 0.005 b at 𝐵=3
+and 𝐵=4, respectively. The snap step also keeps residual padding
+modest, reducing raw-map padding—unused tile slots before quanta
+matching—from 1.30–5.77% to 0.46–1.68%.
+Peak memory footprint. Figure 8 translates the fractional bud-
+get into a fixed-regime peak-footprint study under fixed batch =1,
+modeling peak memory as the maximum of a 256-token prefill
+and a 1-token decode working set with 256 cached tokens. Unlike
+prior work reporting weight-only theoretical savings, our model ac-
+counts for all live buffers: quantized storage, FP16 residue, KV cache,
+live activations, backend scratch, layout metadata, and one reorder
+buffer. At matching integer budgets, PolyQ remains within 1.1% of
+the same-backend AWQ(T-MAC) footprint across all three models,
+confirming that per-channel bit maps and permutation metadata
+add negligible overhead relative to the quantized weights. The key
+benefit is the dense set of intermediate footprints: instead of choos-
+ing only W2/W3/W4, a deployment can select budgets such as 2.6 b
+or 3.4 b and obtain corresponding peak-memory points. For Llama2-
+13B at 𝐵=2.6, storage accounts for 4.75 GiB of the 4.98 GiB peak
+footprint, while layout metadata plus the reorder buffer contribute
+only 0.006 GiB, confirming the fractional footprint is controlled
+primarily by the weight budget, not mixed-precision bookkeeping.
+
+Hyunwoo Oh, Suyeon Jang, Hanning Chen, KyungIn Nam, Sanggeon Yun,
+Ryozo Masukawa, and Mohsen Imani
+AQ
+WQ
+FP16
+AQ ×WQ =Q
+AK
+WK
+FP16
+AK ×WK =K
+AV
+WV
+AV ×WV =V
+QK
+attention score
+FP16
+V
+value stream
+FP16
+QK ×V=AO
+Bit / Basis Legend
+Color: Assigned bit width
+2b
+3b
+4b
+8b
+16b
+Opacity
+A: Input element-wise saliency
+W: Output channel-wise saliency
+Strip Orientation
+Bottom strip: A I/O bit assignment
+Middle strip: W bit assignment
+A
+W
+Shared Basis
+V out
+AO in
+=
+same basis
+no reorder
+AO
+WO
+AO ×WO =O→FFN
+Figure 9: Qualitative compiler layout example from the first transformer block of Llama2-13B at 𝐵=4. The view covers the Q/K/V projections and output projection;
+colors indicate assigned weight precisions after budget allocation and quanta matching. PolyQ groups irregular channel assignments into contiguous same-bit
+groups and propagates a compatible channel order across the block, reducing explicit reorder sites before code generation.
+Falcon-H1-3B
+Llama2-13B
+Qwen3-32B
+0
+9.0
+18
+Average reorder traffic
+(MiB/token)
+46.6% ↓
+70.8% ↓
+52.8% ↓
+No merging
+RPTQ
+Atom
+PolyQ
+Figure 10: Modeled activation reorder traffic on the runtime path, aver-
+aged over 𝐵=3.0–4.0. Bars count A16 read+write traffic for explicit activation
+reorders. Top labels report PolyQ’s average reduction relative to the best
+Atom/RPTQ-style fixed policy [30, 33].
+5.4
+Compiler Layout Regularization
+Representative clustering outcome. Figure 9 visualizes the com-
+piler transformation inside the first transformer block of Llama2-
+13B. Each matrix is shown with bit-width strips and opacity maps:
+colors show assigned precision after budget allocation, while opac-
+ity marks input- or output-channel saliency. Without compilation,
+high-saliency channels appear as scattered islands requiring fre-
+quent activation shuffles between operators. PolyQ turns this irreg-
+ular map into a compile-time layout problem: it permutes channels
+so same-bit groups become contiguous, applies quanta matching
+so those groups fit kernel tile sizes, and propagates one compatible
+channel order across the Q/K/V projections and output projection.
+The fixed-size tile step leaves a few unused tile slots when a group
+size is not divisible by the tile size, but these slots add only 0.58% to
+the packed representation in this Llama2-13B trace. The resulting
+layout absorbs local activation reorders into weight permutations
+and emits 30% and 35% fewer transitions between adjacent bit-
+specific packed blocks at 𝐵=3 and 𝐵=4, respectively.
+Reorder-traffic reduction. Figure 10 isolates layout policy using
+a per-token activation-traffic model that counts A16 read+write
+bytes for explicit activation reorders, since end-to-end runtime
+would otherwise conflate reorder planning with quantizer, packing,
+and scheduler differences. RPTQ-style planning represents fixed
+Ryzen 9950X
+Ryzen 7840U
+Processor N250
+Latency
+(seconds)
+Throughput
+(tokens / seconds)
+AWQ (T-MAC Backend)
+PolyQ
+(a) Prefill Latency
+(b) Decode Throughput
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+2
+2.4
+2.8
+3.2
+3.6
+4
+Target Bit-width
+0.0
+2.0
+4.0
+6.0
+8.0
+2
+2.4
+2.8
+3.2
+3.6
+4
+Target Bit-width
+0.0
+10.0
+20.0
+30.0
+40.0
+50.0
+2
+2.4
+2.8
+3.2
+3.6
+4
+Target Bit-width
+0.0
+10.0
+20.0
+30.0
+40.0
+50.0
+60.0
+2
+2.4
+2.8
+3.2
+3.6
+4
+Target Bit-width
+0.0
+10.0
+20.0
+30.0
+40.0
+2
+2.4
+2.8
+3.2
+3.6
+4
+Target Bit-width
+0.0
+2.0
+4.0
+6.0
+8.0
+10.0
+12.0
+2
+2.4
+2.8
+3.2
+3.6
+4
+Target Bit-width
+Figure 11: CPU system behavior of PolyQ on three CPU targets as a function of
+target average bit budget 𝐵for Llama2-13B. (a) Prefill latency for a 256-token
+prompt. (b) Batch =1 decode throughput on the same platforms. PolyQ closely
+tracks the AWQ baseline executed on the same T-MAC low-bit path, while
+both latency and throughput scale predictably with 𝐵.
+template-based reorder fusion inside a transformer block, Atom-
+style planning represents local fusion around mixed-precision oper-
+ator boundaries, and PolyQ applies DAG-level propagation on the
+entire model. Without merging, explicit activation reorders account
+for 3.28, 6.80, and 14.50 MiB per token on Falcon-H1-3B, Llama2-
+13B, and Qwen3-32B, respectively. The RPTQ-style template gives
+1.88, 3.91, and 6.25 MiB per token, while the Atom-style local policy
+gives 2.53, 4.69, and 8.25 MiB per token. PolyQ further reduces this
+traffic to 1.00, 1.14, and 2.95 MiB per token, corresponding to 46.6%,
+70.8%, and 52.8% less than the best prior-style policy. Thus, the com-
+piler contribution is not a different bit allocation; it is the removal
+of residual runtime layout traffic that fixed local or template-based
+fusion leaves behind.
+5.5
+CPU Throughput and Energy
+Figure 11 reports Llama2-13B prefill latency and batch =1 decode
+throughput, comparing PolyQ with AWQ on the same T-MAC low-
+bit backend for apples-to-apples timing. Slim-LLM, RPTQ, and Atom
+
+PolyQ: Codesigning End-to-End Quantization Framework for Scalable Edge CPU LLM Inference
+Table 3: Energy per token for Llama2-13B at 𝐵=3 from CPU execution.
+Platform
+AWQ+T-MAC [J/token]
+PolyQ [J/token]
+Overhead [%]
+Ryzen 9 9950X
+6.03
+6.10
+1.13%
+Ryzen 7 7840U
+2.77
+2.80
+0.80%
+Intel N250
+2.37
+2.41
+1.89%
+implement GPU-only execution backends and have no CPU infer-
+ence path, precluding direct runtime comparison on T-MAC. Across
+platforms and bit budgets, PolyQ stays close to this integer-budget
+reference. For the integer-budget reference points between 𝐵=2 and
+𝐵=4, prefill latency stays within 4.7% of AWQ(T-MAC) on Ryzen
+9950X, within 5.8–7.3% on Ryzen 7840U, and within 0.1–0.4% on
+Intel N250. Decode throughput shows the same modest gap: the
+shortfall is about 0.2% on Ryzen 9950X, 8.1–8.2% on Ryzen 7840U,
+and 1.2–6.1% on N250, preserving the expected inverse scaling with
+bit budget. Because both systems share the dominant LUT path for
+2/3/4-bit work, runtime mainly tracks quantized weight traffic; the
+remaining gap comes from residual layout/control overhead and
+sparse OpenBLAS dispatches for PolyQ’s higher-precision blocks.
+Scaling with fractional bits. Across the three CPUs, increasing 𝐵
+from 2 to 3 raises PolyQ prefill latency by 1.56–1.58× (0.95–1.51 s on
+Ryzen 9950X, 3.35–5.24 s on Ryzen 7840U, and 21.17–33.09 s on Intel
+N250), close to the ideal 1.50× increase in weight traffic. Increasing
+𝐵from 3 to 4 raises latency by another 1.38–1.46×, close to the ideal
+4/3 ratio. Decode throughput mirrors this trend, dropping by 1.56×
+from 𝐵=2 to 𝐵=3 and by 1.37–1.38× from 𝐵=3 to 𝐵=4 across the
+same platforms. Thus the same budget parameter that controls peak
+footprint in Figure 8 also gives a monotonic latency/throughput
+tradeoff, turning the budget sweep into a usable design curve rather
+than three coarse W2/W3/W4 choices.
+Energy per token. Table 3 shows that PolyQ incurs only 0.8–1.9%
+measured energy/token overhead relative to AWQ(T-MAC) at 𝐵=3
+across all three platforms. Since both systems share the dominant
+LUT-based kernels for 2/3/4-bit work, fractional poly-precision adds
+deployment flexibility at negligible energy cost. The overhead is
+consistently modest across all three CPU classes — workstation, lap-
+top, and mobile — suggesting that the mixed-precision bookkeeping
+cost scales with neither core count nor memory bandwidth.
+Together, these results show that PolyQ turns fractional bit bud-
+gets into a consistent deployment curve across quality, memory
+footprint, compiler layout, throughput, and energy.
+6
+Conclusion
+PolyQ exposes fractional-bit deployment for CPU-only LLM in-
+ference by coupling activation-aware per-channel bit allocation
+with compile-time layout regularization. Our compiler turns irregu-
+lar mixed-precision maps into bit-homogeneous kernel blocks and
+propagates compatible channel orders so that layout management
+stays largely off the runtime path. Across three LLMs and three
+CPU targets, PolyQ preserves fractional target budgets, improves
+low-bit quality by 2.4–32.1% over prior methods at a 3b target, re-
+duces activation reorder traffic by up to 70.8%, and keeps measured
+throughput and energy within 2% of an optimized LUT-based CPU
+path. Overall, PolyQ turns fractional bit budgets into a consistent
+deployment curve across quality, memory footprint, compiler lay-
+out, throughput, and energy. The target average bit-width becomes
+an actionable design variable: the same 𝐵that controls low-bit qual-
+ity recovery also predicts peak footprint and CPU throughput. The
+broader lesson is that low-bit LLM efficiency on CPUs is not only a
+quantizer problem, but a quantizer–compiler co-design problem.
+References
+[1] Keivan Alizadeh, Seyed Iman Mirzadeh, Dmitry Belenko, S Khatamifard, Minsik
+Cho, Carlo C Del Mundo, Mohammad Rastegari, and Mehrdad Farajtabar. 2024.
+LLM in a Flash: Efficient Large Language Model Inference with Limited Memory.
+In 62nd Annual Meeting of the Association for Computational Linguistics (Volume
+1: Long Papers) (ACL). 12562–12584.
+[2] Feng Cheng, Cong Guo, Chiyue Wei, Junyao Zhang, Changchun Zhou, Edward
+Hanson, Jiaqi Zhang, Xiaoxiao Liu, Hai Li, and Yiran Chen. 2025. Ecco: Im-
+proving Memory Bandwidth and Capacity for LLMs via Entropy-Aware Cache
+Compression. In 52nd Annual International Symposium on Computer Architecture
+(ISCA ’25). 793–807. doi:10.1145/3695053.3731024
+[3] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa
+Schoenick, and Oyvind Tafjord. 2018. Think you have Solved Question Answer-
+ing? Try ARC, the AI2 Reasoning Challenge. arXiv:1803.05457v1 (2018).
+[4] Howard David, Eugene Gorbatov, Ulf R. Hanebutte, Rahul Khanna, and Christian
+Le. 2010. RAPL: memory power estimation and capping. In Proceedings of the
+16th ACM/IEEE International Symposium on Low Power Electronics and Design
+(Austin, Texas, USA) (ISLPED ’10). Association for Computing Machinery, New
+York, NY, USA, 189–194. doi:10.1145/1840845.1840883
+[5] Yucheng Ding, Chaoyue Niu, Fan Wu, Shaojie Tang, Chengfei Lyu, and Guihai
+Chen. 2024. Enhancing On-Device LLM Inference with Historical Cloud-Based
+LLM Interactions. In 30th ACM SIGKDD Conference on Knowledge Discovery and
+Data Mining (KDD ’24). Barcelona, Spain, 597–608. doi:10.1145/3637528.3671679
+[6] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2023. GPTQ:
+Accurate Post-Training Quantization for Generative Pre-trained Transformers.
+arXiv:2210.17323 [cs.LG] https://arxiv.org/abs/2210.17323
+[7] Ruihao Gong, Xianglong Liu, Yuhang Li, Yunqiang Fan, Xiuying Wei, and Jinyang
+Guo. 2025. Pushing the Limit of Post-Training Quantization . IEEE Transactions
+on Pattern Analysis & Machine Intelligence 47, 07 (July 2025), 5556–5570. doi:10.
+1109/TPAMI.2025.3554523
+[8] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn
+Song, and Jacob Steinhardt. 2021. Measuring Massive Multitask Language Under-
+standing. Proceedings of the International Conference on Learning Representations
+(ICLR) (2021).
+[9] Wei Huang, Haotong Qin, Yangdong Liu, Yawei Li, Xianglong Liu, Luca Benini,
+Michele Magno, and Xiaojuan Qi. 2024. SliM-LLM: Salience-Driven Mixed-
+Precision Quantization for Large Language Models. arXiv:2405.14917 [cs.LG]
+[10] Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng
+Shen, Michael W. Mahoney, and Kurt Keutzer. 2024. SqueezeLLM: dense-and-
+sparse quantization. In 41st International Conference on Machine Learning (Vienna,
+Austria) (ICML’24). Article 958, 23 pages.
+[11] Sangjun Lee, Seung-taek Woo, Jun-gyu Jin, Changhun Lee, and Eunhyeok Park.
+2025. Amq: Enabling automl for mixed-precision weight-only quantization of
+large language models. In Proceedings of the 2025 Conference on Empirical Methods
+in Natural Language Processing. 35520–35538.
+[12] Jindong Li, Tenglong Li, Ruiqi Chen, Guobin Shen, Dongcheng Zhao, Qian Zhang,
+and Yi Zeng. 2025. Hummingbird: A Smaller and Faster Large Language Model
+Accelerator on Embedded FPGA. In 2025 IEEE/ACM International Conference On
+Computer Aided Design (ICCAD). 1–9. doi:10.1109/ICCAD66269.2025.11241002
+[13] Shiyao Li, Xuefei Ning, Luning Wang, Tengxuan Liu, Xiangsheng Shi, Shengen
+Yan, Guohao Dai, Huazhong Yang, and Yu Wang. 2024. Evaluating quantized
+large language models. In 41st International Conference on Machine Learning
+(ICML’24). Vienna, Austria, Article 1144, 45 pages.
+[14] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen
+Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. AWQ:
+Activation-aware Weight Quantization for on-Device LLM Compression and
+Acceleration. In Annual Conference on Machine Learning and Systems (MLSys),
+Vol. 6. Santa Clara, CA, USA, 87–100.
+[15] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. 2016.
+Pointer Sentinel Mixture Models. arXiv:1609.07843 [cs.CL]
+[16] Hyunwoo Oh, KyungIn Nam, Rajat Bhattacharjya, Hanning Chen, Tamoghno
+Das, Sanggeon Yun, Suyeon Jang, Andrew Ding, Nikil Dutt, and Mohsen Imani.
+2025. T-SAR: A Full-Stack Co-design for CPU-Only Ternary LLM Inference via
+In-Place SIMD ALU Reorganization. arXiv:2511.13676 [cs.AR] https://arxiv.org/
+abs/2511.13676
+[17] OpenBLAS Contributors. [n. d.]. OpenBLAS: An Optimized BLAS Library. https:
+//www.openblas.net/. Accessed: April 11, 2026.
+
+Hyunwoo Oh, Suyeon Jang, Hanning Chen, KyungIn Nam, Sanggeon Yun,
+Ryozo Masukawa, and Mohsen Imani
+[18] Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. 2021.
+WinoGrande: an adversarial winograd schema challenge at scale. Commun. ACM
+64, 9 (Aug. 2021), 99–106. doi:10.1145/3474381
+[19] Rylan Schaeffer, Brando Miranda, and Sanmi Koyejo. 2023. Are Emergent Abilities
+of Large Language Models a Mirage?. In Thirty-seventh Conference on Neural
+Information Processing Systems (NeurIPS).
+https://openreview.net/forum?id=
+ITw9edRDlD
+[20] Falcon-LLM Team. 2025. Falcon-H1: A Family of Hybrid-Head Language Models
+Redefining Efficiency and Performance. https://falcon-lm.github.io/blog/falcon-
+h1
+[21] Qwen Team. 2025. Qwen3 Technical Report. arXiv:2505.09388 [cs.CL] https:
+//arxiv.org/abs/2505.09388
+[22] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yas-
+mine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhos-
+ale, et al. 2023. Llama 2: Open Foundation and Fine-Tuned Chat Models. arXiv
+preprint arXiv:2307.09288 (2023).
+[23] Jinheng Wang, Hansong Zhou, Ting Song, Shijie Cao, Yan Xia, Ting Cao, Jianyu
+Wei, Shuming Ma, Hongyu Wang, and Furu Wei. 2025. Bitnet.cpp: Efficient Edge
+Inference for Ternary LLMs. arXiv preprint arXiv.2502.11880 (2025).
+[24] Kuan Wang, Zhijian Liu, Yujun Lin, Ji Lin, and Song Han. 2019. HAQ: Hardware-
+Aware Automated Quantization With Mixed Precision. In IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR). IEEE, Long Beach, CA, USA,
+8604–8612. doi:10.1109/CVPR.2019.00881
+[25] Jianyu Wei, Shijie Cao, Ting Cao, Lingxiao Ma, Lei Wang, Yanyong Zhang, and
+Mao Yang. 2025. T-MAC: CPU Renaissance via Table Lookup for Low-Bit LLM
+Deployment on Edge. In 21st European Conference on Computer Systems (EuroSys).
+Rotterdam, Netherlands, 278–292. doi:10.1145/3689031.3696099
+[26] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song
+Han. 2023. SmoothQuant: Accurate and Efficient Post-Training Quantization for
+Large Language Models. In 40th International Conference on Machine Learning
+(ICML).
+[27] Daliang Xu, Hao Zhang, Liming Yang, Ruiqi Liu, Gang Huang, Mengwei Xu,
+and Xuanzhe Liu. 2025. Fast On-device LLM Inference with NPUs. In 30th ACM
+International Conference on Architectural Support for Programming Languages
+and Operating Systems (ASPLOS ’25). Association for Computing Machinery,
+Rotterdam, Netherlands, 445–462. doi:10.1145/3669940.3707239
+[28] Chenhao Xue, Chen Zhang, Xun Jiang, Zhutianya Gao, Yibo Lin, and Guangyu
+Sun. 2024. Oltron: Algorithm-Hardware Co-design for Outlier-Aware Quanti-
+zation of LLMs with Inter-/Intra-Layer Adaptation. In 61st ACM/IEEE Design
+Automation Conference (DAC). ACM, San Francisco CA USA, 1–6. doi:10.1145/
+3649329.3656221
+[29] Zhongkai Yu, Shengwen Liang, Tianyun Ma, Yunke Cai, Ziyuan Nan, Di Huang,
+Xinkai Song, Yifan Hao, Jie Zhang, Tian Zhi, Yongwei Zhao, Zidong Du, Xing
+Hu, Qi Guo, and Tianshi Chen. 2024. Cambricon-LLM: A Chiplet-Based Hybrid
+Architecture for On-Device Inference of 70B LLM. In 57th IEEE/ACM International
+Symposium on Microarchitecture (MICRO). 1474–1488. doi:10.1109/MICRO61859.
+2024.00108
+[30] Zhihang Yuan, Lin Niu, Jiawei Liu, Wenyu Liu, Xinggang Wang, Yuzhang
+Shang, Guangyu Sun, Qiang Wu, Jiaxiang Wu, and Bingzhe Wu. 2023.
+RPTQ: Reorder-based Post-training Quantization for Large Language Models.
+arXiv:2304.01089 [cs.CL] https://arxiv.org/abs/2304.01089
+[31] Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019.
+HellaSwag: Can a Machine Really Finish Your Sentence?. In Proceedings of the
+57th Annual Meeting of the Association for Computational Linguistics, Anna Ko-
+rhonen, David Traum, and Lluís Màrquez (Eds.). Association for Computational
+Linguistics, Florence, Italy, 4791–4800. doi:10.18653/v1/P19-1472
+[32] Bingyi Zhang, Rajgopal Kannan, Carl Busart, and Viktor Prasanna. 2024. GCV-
+Turbo: End-to-end Acceleration of GNN-based Computer Vision Tasks on FPGA.
+In 2024 IEEE 32nd Annual International Symposium on Field-Programmable Custom
+Computing Machines (FCCM). 66–77. doi:10.1109/FCCM60383.2024.00017
+[33] Yilong Zhao, Chien-Yu Lin, Kan Zhu, Zihao Ye, Lequn Chen, Size Zheng, Luis
+Ceze, Arvind Krishnamurthy, Tianqi Chen, and Baris Kasikci. 2024. Atom:
+Low-bit Quantization for Efficient and Accurate LLM Serving. arXiv preprint
+arXiv:2310.19102 (2024). https://arxiv.org/abs/2310.19102
+[34] Yue Zheng, Yuhao Chen, Bin Qian, Xiufang Shi, Yuanchao Shu, and Jiming
+Chen. 2025. A Review on Edge Large Language Models: Design, Execution,
+and Applications. ACM Comput. Surv. 57, 8, Article 209 (March 2025), 35 pages.
+doi:10.1145/3719664
