@@ -5,6 +5,9 @@ Applies per-layer bit-width (from ILP) to quantize each Linear:
 - 8-bit layers: RTN with 8-bit (no GPTQ needed — 8-bit is already near-lossless)
 
 Activations are quantized to 8-bit per-token at inference time (W4.8A8 format).
+
+Side effect: stores `_shmq_int_codes`, `_shmq_scales`, `_shmq_n_bits` on each
+Linear module for downstream use by Step 9 (real INT4 inference packing).
 """
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
@@ -12,6 +15,29 @@ import torch
 import torch.nn as nn
 from ..utils import get_module_by_name, symmetric_quantize_weights, symmetric_quantize_activations
 from .gptq import GPTQQuantizer
+
+
+def _store_codes_on_module(mod: nn.Linear, int_codes: torch.Tensor,
+                            scales: torch.Tensor, n_bits: int) -> None:
+    """Cache integer codes + scales on the module for Step 9 reuse."""
+    mod._shmq_int_codes = int_codes.to("cpu").to(torch.int8)
+    mod._shmq_scales = scales.to("cpu").to(torch.float16)
+    mod._shmq_n_bits = int(n_bits)
+
+
+def _rtn_quantize_to_codes(weight: torch.Tensor, n_bits: int, group_size: int
+                            ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """RTN quantization that returns INTEGER codes + scales (not fake-quant)."""
+    out_features, in_features = weight.shape
+    n_groups = in_features // group_size
+    max_q = 2 ** (n_bits - 1) - 1
+    w_g = weight.reshape(out_features, n_groups, group_size)
+    max_abs = w_g.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+    scale = (max_abs / max_q).to(torch.float16)
+    codes = (w_g / scale.to(weight.dtype)).round().clamp(-max_q, max_q).to(torch.int8)
+    codes = codes.reshape(out_features, in_features)
+    scales = scale.squeeze(-1)
+    return codes, scales
 
 
 class MixedPrecisionQuantizer:
@@ -59,11 +85,18 @@ class MixedPrecisionQuantizer:
 
             if n_bits == 8:
                 # 8-bit: RTN (near-lossless, no GPTQ needed)
-                qweight, scale = symmetric_quantize_weights(
+                # Compute integer codes + scales directly (for Step 9 reuse)
+                int_codes, scales = _rtn_quantize_to_codes(
                     mod.weight.data, n_bits=8, group_size=self.group_size,
                 )
-                mod.weight.data = qweight.to(mod.weight.dtype)
-                results[name] = {"qweight": qweight, "scale": scale, "n_bits": 8}
+                # Fake-quant the weight in-place (for compatibility with existing
+                # pipeline code that runs forward passes after Step 8)
+                qweight = (int_codes.to(torch.float32) *
+                           scales.to(torch.float32).repeat_interleave(self.group_size, dim=1)
+                           ).to(mod.weight.dtype)
+                mod.weight.data = qweight
+                _store_codes_on_module(mod, int_codes, scales, n_bits=8)
+                results[name] = {"qweight": qweight, "scale": scales, "n_bits": 8}
             else:
                 # 4-bit: GPTQ (if activations available) or RTN
                 if use_gptq_for_4bit and captured_activations and name in captured_activations:
@@ -73,18 +106,30 @@ class MixedPrecisionQuantizer:
                         gptq.add_batch(a)
                     if captured_activations[name]:
                         qweight = gptq.quantize()
+                        # GPTQQuantizer.quantize() already stored _shmq_int_codes
+                        # and _shmq_scales on the module.
                         scale = gptq.scale
                         gptq.free()
                     else:
-                        qweight, scale = symmetric_quantize_weights(
+                        int_codes, scales = _rtn_quantize_to_codes(
                             mod.weight.data, n_bits=4, group_size=self.group_size,
                         )
-                        mod.weight.data = qweight.to(mod.weight.dtype)
+                        qweight = (int_codes.to(torch.float32) *
+                                   scales.to(torch.float32).repeat_interleave(self.group_size, dim=1)
+                                   ).to(mod.weight.dtype)
+                        mod.weight.data = qweight
+                        _store_codes_on_module(mod, int_codes, scales, n_bits=4)
+                        scale = scales
                 else:
-                    qweight, scale = symmetric_quantize_weights(
+                    int_codes, scales = _rtn_quantize_to_codes(
                         mod.weight.data, n_bits=4, group_size=self.group_size,
                     )
-                    mod.weight.data = qweight.to(mod.weight.dtype)
+                    qweight = (int_codes.to(torch.float32) *
+                               scales.to(torch.float32).repeat_interleave(self.group_size, dim=1)
+                               ).to(mod.weight.dtype)
+                    mod.weight.data = qweight
+                    _store_codes_on_module(mod, int_codes, scales, n_bits=4)
+                    scale = scales
                 results[name] = {"qweight": qweight, "scale": scale, "n_bits": 4}
 
         return results

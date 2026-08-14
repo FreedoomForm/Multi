@@ -73,6 +73,10 @@ class GPTQQuantizer:
 
         Returns:
             qweight: (cout, cin) fake-quantized (dequantized) weight
+
+        Side effect: stores `self.layer._shmq_int_codes` (int8) and
+        `self.layer._shmq_scales` (float16) for downstream use by Step 9
+        (real INT4 inference packing).
         """
         W = self.layer.weight.data.float().clone()  # (cout, cin)
         H = self.H.clone()
@@ -92,6 +96,9 @@ class GPTQQuantizer:
             Hinv = torch.linalg.inv(H)
             Hinv_sqrt = torch.linalg.cholesky(Hinv) if self._is_pd(Hinv) else torch.sqrt(Hinv.diag().diag())
 
+        # Storage for the integer codes computed during GPTQ
+        int_codes = torch.zeros_like(W, dtype=torch.int8)
+
         # Apply GPTQ block by block (along cin axis)
         for i in range(0, self.cin, self.blocksize):
             i_end = min(i + self.blocksize, self.cin)
@@ -109,14 +116,19 @@ class GPTQQuantizer:
                 s = self.scale[:, self._group_index(g_start)]  # (cout,)
                 q_g = (w_g / s.unsqueeze(-1)).round().clamp(-self.max_q, self.max_q)
                 W[:, g_start:g_end] = q_g * s.unsqueeze(-1)
+                int_codes[:, g_start:g_end] = q_g.to(torch.int8)
 
             # Propagate error to remaining columns
             err_block = (W_block - W[:, i:i_end]) / Hinv_sqrt[i:i_end, i:i_end].diag().unsqueeze(0)
             if i_end < self.cin:
                 W[:, i_end:] -= err_block @ Hinv[i:i_end, i_end:]
 
-        # Update layer weight
+        # Update layer weight (fake-quant)
         self.layer.weight.data = W.to(self.layer.weight.dtype)
+        # Store integer codes + scales for Step 9 (real INT4 inference packing)
+        self.layer._shmq_int_codes = int_codes.to("cpu")
+        self.layer._shmq_scales = self.scale.to(torch.float16).to("cpu")
+        self.layer._shmq_n_bits = self.n_bits
         return W
 
     def _group_index(self, col_idx: int) -> int:

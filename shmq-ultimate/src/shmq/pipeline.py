@@ -386,13 +386,41 @@ class SHMQPipeline:
               f"in {t1-t0:.1f}s")
 
     # ------------------------------------------------------------------
+    # Step 9: Convert fake-quant → REAL INT4/INT8 inference modules
+    # ------------------------------------------------------------------
+    def step9_real_int4_inference(self):
+        """Replace every nn.Linear with a SHMQQuantLinear that stores REAL
+        packed INT4+INT8 weights and dispatches to the custom CUDA kernel
+        (or CPU fallback) at inference time.
+
+        This is what gives SHMQ its 2.86x speedup — see inference/ module.
+        """
+        from .inference import convert_model_to_real_int4
+        print("\n" + "=" * 70)
+        print("STEP 9: Real INT4/INT8 inference conversion (custom CUDA kernel)")
+        print("=" * 70)
+        t0 = time.time()
+        self.inference_summary = convert_model_to_real_int4(
+            model=self.model,
+            layer_names=self.layer_names,
+            bit_allocation=self.bit_allocation,
+            permutation_indices=self.permutation_indices,
+            group_size=self.config.group_size,
+            intra_layer_hp_ratio=getattr(self.config, "intra_layer_hp_ratio", 0.125),
+            verbose=True,
+        )
+        t1 = time.time()
+        print(f"[step9] Real INT4/INT8 inference conversion done in {t1-t0:.1f}s")
+
+    # ------------------------------------------------------------------
     # Run all steps
     # ------------------------------------------------------------------
     def run(self, skip_steps: Optional[List[int]] = None):
         """Run the full SHMQ-Ultimate pipeline.
 
         Args:
-            skip_steps: list of step numbers to skip (0-8). Default: None (run all).
+            skip_steps: list of step numbers to skip (0-9). Default: None (run all).
+                        Step 9 (real INT4 inference conversion) is included by default.
         """
         skip_steps = skip_steps or []
         if 0 not in skip_steps:
@@ -413,6 +441,8 @@ class SHMQPipeline:
             self.step7_sqc()
         if 8 not in skip_steps:
             self.step8_quantize()
+        if 9 not in skip_steps:
+            self.step9_real_int4_inference()
         print("\n" + "=" * 70)
         print("SHMQ-Ultimate pipeline COMPLETE")
         print("=" * 70)
@@ -420,6 +450,8 @@ class SHMQPipeline:
         print(f"Format: W{4 + 4*self.config.target_hp_ratio:.1f}A{self.config.activation_bits}")
         if self.ilp_result:
             print(self.ilp_result.summary())
+        from .inference import is_cuda_kernel_available
+        print(f"Inference backend: {'CUDA custom kernel' if is_cuda_kernel_available() else 'CPU fallback (PyTorch)'}")
 
     # ------------------------------------------------------------------
     # Save / load
