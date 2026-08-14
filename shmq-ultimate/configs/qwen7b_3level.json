@@ -1,0 +1,64 @@
+{
+  "model_name": "Qwen/Qwen2.5-7B-Instruct",
+  "device": "cuda",
+  "dtype": "float16",
+  "n_samples": 128,
+  "sequence_length": 2048,
+  "batch_size": 4,
+  "group_size": 128,
+  "smooth_alpha": 0.5,
+  "smooth_scale_min": 1e-5,
+
+  "bit_levels": [4, 8, 16],
+  "use_3level_ilp": true,
+
+  "target_hp_ratio_16": 0.05,
+  "target_hp_ratio_8": 0.20,
+  "base_hp_ratio_8": 0.125,
+  "target_avg_bits": null,
+
+  "intra_layer_hp_ratio_16": 0.05,
+  "intra_layer_hp_ratio_8": 0.20,
+
+  "inter_layer_hessian": "fisher",
+  "dampening": 0.1,
+  "use_mean_diag_dampening": true,
+
+  "enable_autoround": true,
+  "autoround_iters": 200,
+  "autoround_lr": null,
+  "autoround_lr_schedule": "linear",
+  "autoround_block_size": 128,
+
+  "enable_sqc": true,
+  "sqc_zscore_threshold": 3.0,
+  "sqc_scale_range": [0.9, 1.1],
+  "sqc_scale_search_points": 11,
+  "sqc_salience_lambda": 0.1,
+
+  "gptq_percdamp": 0.01,
+  "gptq_block_size": 128,
+  "gptq_actorder": false,
+  "activation_bits": 8,
+
+  "ilp_solver": "PULP_CBC_CMD",
+  "ilp_time_limit": 60,
+
+  "enable_isa_matching": true,
+  "isa_tile_16": 128,
+  "isa_tile_8": 128,
+  "isa_tile_4": 64,
+  "isa_prefer_upgrade": true,
+
+  "excluded_layer_keywords": ["embed_tokens", "lm_head", "norm", "layernorm", "rmsnorm"],
+
+  "parallel_groups": {
+    "attention": ["q_proj", "k_proj", "v_proj"],
+    "ffn": ["up_proj", "gate_proj"]
+  },
+
+  "permutation_metric": "act_weight_linf",
+  "permutation_sort_by_magnitude": true,
+
+  "use_flash_attention": false
+}

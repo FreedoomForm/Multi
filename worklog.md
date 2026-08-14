@@ -2241,3 +2241,61 @@ Stage Summary:
 - Files added: 14 source files + 2 configs + 1 test + 1 script + README = 2,533 lines
 - Next step for user: run `python scripts/gpu/run_pipeline.py --config configs/qwen7b_paper.json --eval-ppl` on A100/H100 GPU
 - Expected result: WikiText-2 PPL ~7.58 (vs FP16 ~7.55, gap ≤ 0.13%), inference speedup 2.86× via MixLLM kernel
+
+---
+Task ID: 13 (3-level MixLLM refactor)
+Agent: main (Super Z)
+Task: Реконструкция SHMQ-Ultimate под 3-уровневую схему {4,8,16} + MixLLM CUDA kernel + PolyQ ISA matching + SliM-LLM (GPTQ OBS + SQC) + AutoRound + SmoothQuant + HAWQ-V3 ILP
+
+Work Log:
+- Прочитал SHMQ paper: Eq.4 (two-stage opt), Eq.5 (per-element sensitivity), Eq.6 (Fisher H≈F=1/|D|·Σg·gᵀ), Eq.7 (inter-layer sensitivity), Eq.10 (OBS per-element Hessian with H=XXᵀ+λ·mean(diag)), Eq.11 (Manhattan norm S_IntraMQ=||S:,j||₁), Eq.12 (decoupled identification Csen=I(SIntraMQ,K), K=⌊cin·Ul⌉), §3.2.3 (decoupled permutation: sort asc → partition → sort by magnitude within each cluster).
+- Нашёл parallel constraint в Appendix (lines 1826-1846): inter-layer = mean of q/k/v sensitivities; intra-layer = concatenate then Manhattan. Result: q/k/v share precision ratio AND permutation indices; up/gate share too.
+- Склонировал MixLLM (Microsoft) — https://github.com/microsoft/MixLLM. Изучил kernel API:
+    * `mixllm_gemm(matrix_A, matrix_scale_act, matrix_zero, matrix_scale_int8, matrix_scale_int4, matrix_indices_int8, matrix_indices_int4, matrix_B_int8, matrix_B_interleaved)` — 558 lines CUDA.
+    * Использует `matrix_indices_int8` и `matrix_indices_int4` для разделения каналов — **permutation natively supported**.
+    * Group size = 128 (нативный для INT8 и INT4 tensor cores).
+    * vLLM v0.9.0 patch включён.
+- Создал 3-level ILP solver (`src/shmq/ilp/solver_3level.py`, 232 строки):
+    * Indicator variables y_4, y_8, y_16 ∈ {0,1} (binary, sum=1)
+    * Objective: minimize Σ s_i·(y_4·q4 + y_8·q8 + y_16·q16)  (q16≈0 для FP16)
+    * Constraint 1: memory budget (avg bits ≤ target)
+    * Constraint 2: optional floor (UB)
+    * Constraint 3: parallel-layer equality (q/k/v; up/gate)
+- Создал PolyQ ISA matching (`src/shmq/polyq/isa_matching.py`, 232 строки):
+    * Round cluster sizes to tensor-core tiles: 128 для INT8/FP16, 64 для INT4
+    * prefer_upgrade=True: leftover channels идут сначала в C16, потом C8, потом C4
+    * Budget enforcement: если budget превышен, downgrade C16→C8→C4 по tile-границам
+- Создал MixLLM adapter (`src/shmq/mixllm/adapter.py`, 495 строк):
+    * `pack_int4_weights` и `pack_int8_weights` — упаковка в MixLLM формат (scale shape (n_groups, n_out), zero=8 для symmetric INT4)
+    * `SHMQMixLLMLinear` — комбинированный FP16+INT8+INT4 linear layer
+    * FP16 каналы → cuBLAS (torch.matmul), INT8+INT4 → MixLLM kernel, output суммируется
+    * PyTorch fallback для CPU (правильный, но медленный)
+    * `convert_model_to_mixllm` — заменяет все nn.Linear в модели
+- Расширил decoupled.py: добавил `decoupled_permutation_3level` и `apply_permutation_to_parallel_layers_3level` (3 кластера C16/C8/C4, ISA-aware tile rounding).
+- Обновил config.py: добавил target_hp_ratio_16/8, base_hp_ratio_8, intra_layer_hp_ratio_16/8, ISA tile sizes, use_3level_ilp, computed_target_avg_bits property.
+- Обновил pipeline.py: 11-step pipeline (SmoothQuant → Fisher/OBS sensitivity → 3-level ILP → ISA matching → 3-level permutation → RMSNorm fusion → AutoRound → SQC → GPTQ fake quant → MixLLM conversion).
+- Создал configs/qwen7b_3level.json (5% FP16 + 20% INT8 + 75% INT4 = 5.4 avg bits).
+- Обновил utils.py: добавил get_parent_module_and_attr, 16-bit support в compute_quant_error (returns 0 для FP16).
+- Обновил ilp/__init__.py и permutation/__init__.py для экспорта новых API.
+- Создал smoke test `scripts/smoke_test_3level.py` — ALL TESTS PASSED:
+    * SHMQConfig: target_avg_bits = 5.4 (75%*4 + 20%*8 + 5%*16) ✓
+    * ILP 3-level: 7 layers @ 4-bit, 3 @ 8-bit, 0 @ 16-bit, avg=5.2 bits (under 5.4 budget) ✓
+    * ISA matching: k16=128, k8=768, k4=3200 — all aligned to tile boundaries ✓
+    * 3-level permutation: C16 sens=0.984 > C4 sens=0.388 ✓
+    * MixLLM adapter: forward output shape (8, 512), no NaN ✓
+- MixLLM CUDA kernel не загрузился на CPU (ожидаемо — нужен GPU). PyTorch fallback работает корректно.
+
+Stage Summary:
+- 3-level {4,8,16} архитектура полностью реализована и протестирована на synthetic данных.
+- Все 7 источников интегрированы по ролям:
+    * HAWQ-V3 → ILP solver (PULP, 3-level extension)
+    * SliM-LLM → GPTQ OBS (per-element Hessian) + SQC calibration
+    * SHMQ paper → Eq.12 decoupled permutation (extended to 3 clusters), Eq.4 parallel constraint, §3.2 RMSNorm fusion
+    * AutoRound → 200-step SignSGD learnable rounding
+    * SmoothQuant → activation outlier migration (pre-processing)
+    * PolyQ → ISA-aware quanta matching (tile boundary rounding)
+    * MixLLM → production CUDA kernel for mixed INT4/INT8 GEMM + vLLM patch
+- Новые файлы: solver_3level.py (232L), isa_matching.py (232L), adapter.py (495L), qwen7b_3level.json, smoke_test_3level.py
+- Изменённые файлы: config.py, pipeline.py (полностью переписан под 3 уровня), decoupled.py (добавлены 3-level функции), utils.py, ilp/__init__.py, permutation/__init__.py
+- Total SHMQ-Ultimate codebase: ~6,500 строк (5,038 существующих + ~1,500 новых)
+- Готово к запуску на GPU с Qwen2.5-7B-Instruct (нужен GPU для MixLLM kernel compilation + model loading).

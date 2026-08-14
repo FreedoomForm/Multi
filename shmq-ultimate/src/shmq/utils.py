@@ -41,6 +41,22 @@ def set_module_by_name(model: nn.Module, name: str, new_module: nn.Module):
     setattr(parent, parts[-1], new_module)
 
 
+def get_parent_module_and_attr(model: nn.Module, name: str) -> Tuple[nn.Module, str]:
+    """Return (parent_module, attr_name) such that getattr(parent, attr) == named module.
+
+    Returns (None, name) if any intermediate module is missing.
+    """
+    parts = name.split(".")
+    parent = model
+    for p in parts[:-1]:
+        if not hasattr(parent, p):
+            return None, name
+        parent = getattr(parent, p)
+    if not hasattr(parent, parts[-1]):
+        return None, name
+    return parent, parts[-1]
+
+
 def symmetric_quantize_weights(weight: torch.Tensor, n_bits: int = 4,
                                 group_size: int = 128,
                                 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -99,7 +115,13 @@ def symmetric_quantize_activations(activation: torch.Tensor, n_bits: int = 8,
 
 def compute_quant_error(weight: torch.Tensor, n_bits: int = 4,
                         group_size: int = 128) -> float:
-    """Compute ||W - Q(W)||^2 (sum squared quantization error)."""
+    """Compute ||W - Q(W)||^2 (sum squared quantization error).
+
+    For n_bits >= 16, returns 0.0 (FP16/BF16 is considered lossless
+    relative to its own precision).
+    """
+    if n_bits >= 16:
+        return 0.0
     qweight, _ = symmetric_quantize_weights(weight, n_bits, group_size)
     return float(((weight - qweight) ** 2).sum().item())
 

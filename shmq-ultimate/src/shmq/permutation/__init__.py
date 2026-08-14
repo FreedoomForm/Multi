@@ -17,8 +17,10 @@ Decoupled permutation algorithm:
 from .metric import compute_permutation_metric, capture_input_activations
 from .decoupled import (
     decoupled_permutation,
+    decoupled_permutation_3level,
     apply_permutation_to_layer,
     apply_permutation_to_parallel_layers,
+    apply_permutation_to_parallel_layers_3level,
 )
 from .rmsnorm_fusion import PermutedRMSNorm, fuse_permutation_into_rmsnorm
 
@@ -26,8 +28,10 @@ __all__ = [
     "compute_permutation_metric",
     "capture_input_activations",
     "decoupled_permutation",
+    "decoupled_permutation_3level",
     "apply_permutation_to_layer",
     "apply_permutation_to_parallel_layers",
+    "apply_permutation_to_parallel_layers_3level",
     "PermutedRMSNorm",
     "fuse_permutation_into_rmsnorm",
 ]

@@ -17,14 +17,33 @@ class SHMQConfig:
     # ------------------------------------------------------------------
     # Quantization format
     # ------------------------------------------------------------------
-    #: Target high-precision ratio (paper: 0.20 for W4.8A8 = W4A8 + 20% W8A8).
+    #: Bit-width levels — 3 levels {4, 8, 16} for SHMQ-Ultimate.
+    #: 16-bit = FP16/BF16 (kept original), 8-bit = INT8, 4-bit = INT4.
+    bit_levels: Tuple[int, ...] = (4, 8, 16)
+
+    #: Target ratio of FP16 channels across the model (e.g. 0.05 = 5% FP16).
+    target_hp_ratio_16: float = 0.05
+
+    #: Target ratio of INT8 channels across the model (e.g. 0.20 = 20% INT8).
+    target_hp_ratio_8: float = 0.20
+
+    #: Base (floor) ratio of INT8 channels — guarantees UB floor (paper: 0.125).
+    base_hp_ratio_8: float = 0.125
+
+    #: Target average bits per parameter (computed from ratios if None).
+    #: If None, computed as 4*(1-r16-r8) + 8*r8 + 16*r16.
+    target_avg_bits: Optional[float] = None
+
+    #: Per-layer intra-cluster ratios (for 4-bit layers).
+    #: Fraction of channels within a 4-bit layer that go to FP16 / INT8.
+    intra_layer_hp_ratio_16: float = 0.05
+    intra_layer_hp_ratio_8: float = 0.20
+
+    #: Legacy field kept for backward compatibility (used by 2-level code paths).
     target_hp_ratio: float = 0.20
 
-    #: Base high-precision ratio Ub (paper: 0.125 = 12.5%).
+    #: Legacy field kept for backward compatibility.
     base_hp_ratio: float = 0.125
-
-    #: Bit-width levels (2 levels {4, 8} — native GPU formats).
-    bit_levels: Tuple[int, ...] = (4, 8)
 
     #: Group size for per-group symmetric quantization (paper: 128).
     group_size: int = 128
@@ -159,6 +178,25 @@ class SHMQConfig:
     #: ILP time limit (seconds).
     ilp_time_limit: int = 30
 
+    #: Use 3-level {4,8,16} ILP solver (default True).
+    #: If False, fall back to 2-level {4,8} solver (legacy).
+    use_3level_ilp: bool = True
+
+    # ------------------------------------------------------------------
+    # PolyQ ISA-aware quanta matching (Step 3.5)
+    # ------------------------------------------------------------------
+    #: Enable ISA-aware quanta matching (PolyQ).
+    enable_isa_matching: bool = True
+
+    #: Tensor-core tile sizes for each precision.
+    isa_tile_16: int = 128
+    isa_tile_8:  int = 128
+    isa_tile_4:  int = 64
+
+    #: When ISA matching creates a surplus, prefer upgrading channels
+    #: to higher precision (True) or downgrading to lower precision (False).
+    isa_prefer_upgrade: bool = True
+
     # ------------------------------------------------------------------
     # Model / runtime
     # ------------------------------------------------------------------
@@ -180,14 +218,20 @@ class SHMQConfig:
     def __post_init__(self):
         assert self.inter_layer_hessian in ("fisher", "pyhessian"), \
             f"inter_layer_hessian must be 'fisher' or 'pyhessian', got {self.inter_layer_hessian}"
-        assert len(self.bit_levels) == 2, \
-            f"SHMQ-Ultimate supports exactly 2 bit levels {{4,8}}, got {self.bit_levels}"
-        assert set(self.bit_levels) == {4, 8}, \
-            f"bit_levels must be (4, 8) or (8, 4), got {self.bit_levels}"
-        assert 0.0 <= self.base_hp_ratio <= 1.0, "base_hp_ratio must be in [0, 1]"
-        assert 0.0 <= self.target_hp_ratio <= 1.0, "target_hp_ratio must be in [0, 1]"
-        assert self.target_hp_ratio >= self.base_hp_ratio, \
-            "target_hp_ratio must be >= base_hp_ratio"
+        assert set(self.bit_levels).issubset({4, 8, 16}), \
+            f"bit_levels must be subset of {{4, 8, 16}}, got {self.bit_levels}"
+        if self.use_3level_ilp:
+            assert set(self.bit_levels) == {4, 8, 16}, \
+                f"3-level ILP requires bit_levels=(4,8,16), got {self.bit_levels}"
+            r16 = self.target_hp_ratio_16
+            r8 = self.target_hp_ratio_8
+            assert 0.0 <= r16 and 0.0 <= r8 and r16 + r8 <= 1.0, \
+                f"ratios r16={r16} + r8={r8} must be in [0, 1]"
+        else:
+            assert set(self.bit_levels) == {4, 8}, \
+                f"2-level ILP requires bit_levels=(4,8), got {self.bit_levels}"
+        assert 0.0 <= self.base_hp_ratio_8 <= 1.0, "base_hp_ratio_8 must be in [0, 1]"
+        assert 0.0 <= self.target_hp_ratio_8 <= 1.0, "target_hp_ratio_8 must be in [0, 1]"
         if self.autoround_lr is None:
             object.__setattr__(self, "autoround_lr", 1.0 / self.autoround_iters)
 
@@ -209,21 +253,41 @@ class SHMQConfig:
         """Dampening factor (Python keyword workaround)."""
         return self.dampening
 
+    @property
+    def computed_target_avg_bits(self) -> float:
+        """Compute target average bits from r16/r8 ratios."""
+        if self.target_avg_bits is not None:
+            return self.target_avg_bits
+        r16 = self.target_hp_ratio_16
+        r8 = self.target_hp_ratio_8
+        r4 = 1.0 - r16 - r8
+        return 4.0 * r4 + 8.0 * r8 + 16.0 * r16
+
     def summary(self) -> str:
         """Human-readable summary."""
+        if self.use_3level_ilp:
+            fmt = (f"W{self.computed_target_avg_bits:.2f}A{self.activation_bits} "
+                   f"(4-bit: {(1-self.target_hp_ratio_16-self.target_hp_ratio_8)*100:.1f}% "
+                   f"+ 8-bit: {self.target_hp_ratio_8*100:.1f}% "
+                   f"+ 16-bit: {self.target_hp_ratio_16*100:.1f}%)")
+        else:
+            fmt = (f"W{4 + 4 * self.target_hp_ratio:.1f}A{self.activation_bits} "
+                   f"(W4A{self.activation_bits} + {self.target_hp_ratio*100:.1f}% W8A{self.activation_bits})")
         return (
             f"SHMQ-Ultimate Config:\n"
-            f"  Format: W{4 + 4 * self.target_hp_ratio:.1f}A{self.activation_bits} "
-            f"(W4A{self.activation_bits} + {self.target_hp_ratio*100:.1f}% W8A{self.activation_bits})\n"
+            f"  Format: {fmt}\n"
             f"  Bit levels: {self.bit_levels}\n"
             f"  Group size: {self.group_size}\n"
-            f"  UB (base HP ratio): {self.base_hp_ratio}\n"
-            f"  Ut (target HP ratio): {self.target_hp_ratio}\n"
+            f"  UB (base HP ratio 8): {self.base_hp_ratio_8}\n"
+            f"  Ut (target HP ratio 8): {self.target_hp_ratio_8}\n"
+            f"  Ut16 (target HP ratio 16): {self.target_hp_ratio_16}\n"
+            f"  Target avg bits: {self.computed_target_avg_bits:.3f}\n"
             f"  lambda (dampening): {self.dampening}\n"
             f"  Inter-layer Hessian: {self.inter_layer_hessian}\n"
             f"  SmoothQuant alpha: {self.smooth_alpha}\n"
             f"  AutoRound: iters={self.autoround_iters}, lr={self.autoround_lr:.4f}\n"
             f"  SQC: {self.enable_sqc}\n"
+            f"  ISA matching: {self.enable_isa_matching}\n"
             f"  Calibration: {self.n_samples} samples x {self.sequence_length} tokens "
             f"from {self.calibration_dataset}\n"
             f"  Model: {self.model_name}\n"
