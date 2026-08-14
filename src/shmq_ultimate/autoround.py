@@ -69,17 +69,29 @@ def autoround_layer(
     if act_samples:
         X = torch.cat([a.float() for a in act_samples], dim=0)  # (N, cin)
 
-    for _ in range(iters):
-        opt.zero_grad(set_to_none=True)
-        q = torch.clamp(_round_ste(wg / s + V), lo, hi) * s
+    def eval_loss(Vt: torch.Tensor) -> torch.Tensor:
+        q = torch.clamp(_round_ste(wg / s + Vt), lo, hi) * s
         wq = q.view(cout, cin)
         if X is not None:
-            loss = ((X @ (wq - w).t()) ** 2).mean()
-        else:
-            loss = ((wq - w) ** 2).mean()
+            return ((X @ (wq - w).t()) ** 2).mean()
+        return ((wq - w) ** 2).mean()
+
+    best_loss = float(eval_loss(torch.zeros_like(wg)))
+    best_V = torch.zeros(cout, cin)
+
+    for step in range(iters):
+        # linear lr decay (AutoRound schedule)
+        for grp in opt.param_groups:
+            grp["lr"] = lr * (1.0 - step / iters)
+        opt.zero_grad(set_to_none=True)
+        loss = eval_loss(V)
         loss.backward()
         opt.step()
         with torch.no_grad():
             V.clamp_(-0.5, 0.5)
+            cur = float(eval_loss(V))
+            if cur < best_loss:
+                best_loss = cur
+                best_V = V.detach().view(cout, cin).clone()
 
-    return V.detach().view(cout, cin)
+    return best_V

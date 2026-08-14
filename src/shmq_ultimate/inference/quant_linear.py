@@ -106,7 +106,7 @@ class SHMQUltimateLinear(nn.Module):
             w8 = self.w8.float().view(self.cout, self.n8 // g, g)
             # per-group partial products: (M, cout)
             acc = torch.einsum("mkg,ckg->mck", qxf, w8)  # (M, cout, ngroups)
-            y += (acc * self.s8.float().unsqueeze(0)).sum(-1) * sx.unsqueeze(1)
+            y += (acc * self.s8.float().unsqueeze(0)).sum(-1) * sx
         # INT4 segment
         if self.n4 > 0:
             xs = xf[:, self.n16 + self.n8 :]
@@ -114,7 +114,7 @@ class SHMQUltimateLinear(nn.Module):
             w4 = unpack_int4(self.w4).float().view(self.cout, self.n4 // g, g)
             qxf = qx.float().view(-1, self.n4 // g, g)
             acc = torch.einsum("mkg,ckg->mck", qxf, w4)
-            y += (acc * self.s4.float().unsqueeze(0)).sum(-1) * sx.unsqueeze(1)
+            y += (acc * self.s4.float().unsqueeze(0)).sum(-1) * sx
         if self.bias is not None:
             y += self.bias.float().unsqueeze(0)
         return y.to(x.dtype).reshape(*in_shape[:-1], self.cout)
