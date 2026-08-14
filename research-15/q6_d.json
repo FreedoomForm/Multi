@@ -1,0 +1,74 @@
+[
+  {
+    "url": "https://discuss.vllm.ai/t/speeding-up-vllm-inference-for-qwen2-5-vl/615",
+    "name": "Speeding up vllm inference for Qwen2.5-VL - General",
+    "snippet": "May 14, 2025 — Your current throughput (764 prompt tokens /s, 132.4 generation tokens /s) is within the expected range for Qwen2 . 5 -VL- 7B on A100, ... Read more",
+    "host_name": "discuss.vllm.ai",
+    "rank": 0,
+    "date": "May 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.readthedocs.io/en/v2.5/benchmark/speed_benchmark.html",
+    "name": "Qwen2.5 Speed Benchmark - Qwen - Read the Docs",
+    "snippet": "This section reports the speed performance of bf16 models, quantized models (including GPTQ -Int4, GPTQ -Int8 and AWQ ) of the Qwen2 . 5 series.",
+    "host_name": "qwen.readthedocs.io",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/issues/21030",
+    "name": "[Feature]: The inference accelation for quantized qwen2.5vl",
+    "snippet": "Jul 15, 2025 — The feature, motivation and pitch I launched a vLLM server to test the inference speed of quantized Qwen2 . 5 -VL models ( GPTQ and AWQ ).",
+    "host_name": "github.com",
+    "rank": 2,
+    "date": "Jul 15, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.readthedocs.io/en/v2.0/benchmark/speed_benchmark.html",
+    "name": "Speed Benchmark - Qwen",
+    "snippet": "This section reports the speed performance of bf16 models, quantized models (including GPTQ -Int4, GPTQ -Int8 and AWQ ) of the Qwen2 series. 7B ( vLLM )",
+    "host_name": "qwen.readthedocs.io",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://saumilya.medium.com/i-ran-133-benchmarks-to-find-out-if-vllm-is-actually-faster-than-huggingface-b75f4fb6b3bd",
+    "name": "I ran 133 benchmarks to find out if vLLM is actually faster than",
+    "snippet": "Throughput ( tokens / second ): how many tokens the model generates per second , once it's going. ... vLLM Qwen2 . 5 - 7B 27,775 ms 13.31 tok/s vLLM Llama- ... Read more",
+    "host_name": "saumilya.medium.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://developers.redhat.com/articles/2025/04/01/enable-faster-vision-language-models-quantization",
+    "name": "Enable 3.5 times faster vision language models with",
+    "snippet": "Apr 1, 2025 — With vLLM , up to 3.5 times faster throughput scenarios and 3.2 times more requests per second for server scenarios.",
+    "host_name": "developers.redhat.com",
+    "rank": 5,
+    "date": "Apr 1, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://zenn.dev/toki_mwc/articles/ed9ad65bca8691?locale=en",
+    "name": "Benchmarking Qwen3 (AWQ/GPTQ) on RTX 5090 with",
+    "snippet": "Jan 8, 2026 — vLLM 0.11.0 environment showed that \" GPTQ is 8-19% faster than AWQ \". GPTQ quantization is faster than AWQ . Speed improvements of +13.4% for 14B ...",
+    "host_name": "zenn.dev",
+    "rank": 6,
+    "date": "Jan 8, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://note.com/asagi_ai_lab/n/nbfe974578983?hl=en",
+    "name": "I want to run Qwen2.5-7B on the Colab free tier!",
+    "snippet": "Achieved a generation speed of approximately 43 tokens /s. The 7B model runs surprisingly smoothly even with 16GB of VRAM. 43 tokens per second ...",
+    "host_name": "note.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  }
+]

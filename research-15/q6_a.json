@@ -1,0 +1,74 @@
+[
+  {
+    "url": "https://github.com/eleutherai/lm-evaluation-harness",
+    "name": "Language Model Evaluation Harness",
+    "snippet": "A framework for few- shot evaluation of language models. LM Evaluation Harness to create and evaluate on text+image multimodal input, text output tasks,",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org/html/2608.08506v1",
+    "name": "Understanding Calibration and Truncation Error",
+    "snippet": "6 days ago — In Tables 6 and 7 , we break down the LM - Eval 0 - shot average performance reported in the main Table 1 by benchmark for Llama-{3.2-1B, 3.1-8B} and ... Read more",
+    "host_name": "arxiv.org",
+    "rank": 1,
+    "date": "Aug 8, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/blog/Neo111x/integrating-benchmarks-into-lm-evaluation-harness",
+    "name": "Integrating benchmarks into LM Evaluation Harness",
+    "snippet": "Jul 20, 2025 — The harness provides a standardized way to compare model performance across datasets like MMLU, HellaSwag , ARC , and more. It is modular ... Read more",
+    "host_name": "huggingface.co",
+    "rank": 2,
+    "date": "Jul 20, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.nvidia.com/nemo/microservices/25.6.0/evaluate/evaluation-types/lm-harness.html",
+    "name": "LM Harness Evaluation Type — NVIDIA NeMo Microservices",
+    "snippet": "Jul 9, 2025 — LM Evaluation Harness supports over 60 standard academic benchmarks for LLMs, including MMLU, GSM8K, and HellaSwag. Use this evaluation type to ... Read more",
+    "host_name": "docs.nvidia.com",
+    "rank": 3,
+    "date": "Jul 9, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/EleutherAI/lm-evaluation-harness/issues/1833",
+    "name": "Issue #1833 · EleutherAI/lm-evaluation-harness",
+    "snippet": "May 13, 2024 — I am a newer of lm-eval and I want to test the llama2 model with lm - evaluation - harness using wikitext - 2 dataset. The setps are as follows:. Read more",
+    "host_name": "github.com",
+    "rank": 4,
+    "date": "May 13, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://zenodo.org/records/12608602",
+    "name": "EleutherAI/lm-evaluation-harness: v0.4.3",
+    "snippet": "Jul 1, 2024 — LM Eval Harness for PyPI … a perplexity eval taken from a subset of the Pile's validation set , evaluation in arc multiple choice format",
+    "host_name": "zenodo.org",
+    "rank": 5,
+    "date": "Jul 1, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.eleuther.ai/projects/large-language-model-evaluation",
+    "name": "Evaluating LLMs",
+    "snippet": "Feb 15, 2026 — LM Evaluation Harness , a unifying framework that allows any causal language model to be tested on the same exact inputs and codebase.",
+    "host_name": "www.eleuther.ai",
+    "rank": 6,
+    "date": "Feb 15, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://medium.com/@kimdoil1211/evaluating-llm-accuracy-with-lm-evaluation-harness-for-local-server-a-comprehensive-guide-933df1361d1d",
+    "name": "Evaluating LLM Accuracy with lm-evaluation-harness for",
+    "snippet": "The lm - evaluation - harness by EleutherAI offers a reliable, quantitative tool to evaluate LLMs on diverse tasks. This article guides you step-by- ... Read more",
+    "host_name": "medium.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  }
+]

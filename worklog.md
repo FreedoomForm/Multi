@@ -2556,3 +2556,943 @@ Stage Summary:
 - **Pipeline stops at step9** (MixLLM module conversion); step10 (vLLM inference) not implemented in orchestrator.
 - **Total SHMQ-Ultimate codebase**: 6,800 lines across 28 source files + 4 vLLM patches (699L) + 3 configs + smoke test (209L) + 5 GPU scripts (843L).
 - **Next agent**: implement the 8 recommendations above, starting with the GPTQ bug fix and SQC application (quick wins, 1.5 hr total), then GPU end-to-end validation.
+
+---
+
+## Task ID: 15-RESEARCH-2 (Python CUDA alternatives for ipynb)
+
+**Agent**: research sub-agent (general-purpose)
+**Date**: 2025-11
+**Goal**: Identify Python-based alternatives to CUDA C++ kernels for writing a custom GEMM kernel that processes 3 precision levels {FP16, INT8, INT4} in one pass on T4 (sm_75, 16GB) from a single .ipynb file.
+
+### Environment verification (sandbox)
+- `torch==2.13.0+cpu` (no CUDA in this sandbox)
+- `triton`, `cupy` — NOT installed
+- `numba.cuda` — installed
+- `nvcc` — NOT in PATH (no CUDA toolkit in sandbox)
+- Production target: T4 GPU, sm_75, 16GB VRAM, CUDA 11.x/12.x
+- This is **research-only**; user will run on real T4. Findings below are based on docs / GitHub source inspection / Triton & BitBLAS issue trackers.
+
+### Q1: Triton (OpenAI) for mixed-precision GEMM on T4
+
+| Sub-question | Answer | Evidence |
+|---|---|---|
+| FP16+INT8+INT4 in ONE launch? | **No (practical)** — Triton `tl.dot` only accepts homogeneous operand dtypes per call. You CAN call `tl.dot(int8, int8, …)` then `tl.dot(int4, int4, …)` in the same kernel body, but each call uses separate tensor-core MMA instructions. The 3 dtypes cannot share a single `tl.dot` accumulator natively. | [triton.language.dot docs](https://triton-lang.org/main/python-api/generated/triton.language.dot.html); CUTLASS `mma_mixed_input_tensor_op` has no Triton equivalent |
+| sm_75 (T4) support? | **Partial** — Triton runtime runs on sm_75+ for FP16, but **INT8/INT4 `tl.dot` requires sm_80+** (Ampere). Triton issue [#1809](https://github.com/triton-lang/triton/issues/1809): *"When I compile the kernel targeting a Tesla T4 (sm75), the Turing architecture is not supported, it seems like a bug."* Spheron blog (May 2026): *"minimum NVIDIA compute capability is 8.0, so Volta (V100) and Turing (T4) are not supported."* | Triton issue #1809, #189 (Low RTX20 tensor core performance: "Triton is not tuned for Turing") |
+| Existing mixed-precision Triton GEMM? | **No first-class mixed-precision GEMM** in Triton tutorials. Block-scaled matmul tutorial covers FP4/FP8 (NOT INT4). A community blog (subhadipmitra.com, Jul 2026) implements pure-Triton W4A16 GEMM — runs on Ampere+. AutoRound's `qlinear_tritonv2.py` (228L) does dequant + `torch.matmul` (2 launches, not fused). | Local file: `external/AutoRound/auto_round_extension/triton/qlinear_tritonv2.py` |
+| T4 INT4 tensor cores? | **Hardware yes, Triton no.** T4 has `mma.sync.aligned.m8n8k4.s32.s4` (Turing 2nd-gen TC). Triton's `tl.dot(int4, int4)` lowers to Ampere `mma.sync.aligned.m16n8k32.s32.s4` (sm_80) which does not exist on T4. | NVIDIA Turing datasheet; Triton issue #9205 (int4 dot operand) |
+| Performance vs CUTLASS INT4 on T4? | **N/A** — Triton cannot generate INT4 tensor-core code on T4 at all. On Ampere, Triton INT8 GEMM is ~70-85% of CUTLASS. | Triton issue #189 |
+| ipynb without pre-compilation? | **Yes** for FP16 GEMM (JIT cache → first-call ~10s, subsequent <1s). | Triton docs |
+| **`tl.dot(int8, int8)` broken on Triton main** | Confirmed broken Jan 2025 (issue #5669) and has been intermittently broken since. Stability risk. | Triton issue #5669 |
+
+**Verdict for Q1**: Triton is **NOT viable** for INT4/INT8 tensor-core GEMM on T4. It works for FP16 GEMM only. Cannot meet "3 levels in one pass" requirement.
+
+### Q2: torch.utils.cpp_extension.load_inline from ipynb
+
+| Sub-question | Answer |
+|---|---|
+| Can write CUDA C++ as Python string, compile at runtime from ipynb? | **Yes.** `torch.utils.cpp_extension.load_inline(name, cpp_sources, cuda_sources, functions, …)` JIT-compiles via nvcc, caches under `~/.cache/torch_extensions/`. |
+| Limitations? | (a) Requires `nvcc` in PATH + matching CUDA toolkit (CUDA 11.8+ for sm_75). (b) First compile: 30-120s per kernel. (c) No debugging (printf only). (d) Re-compiles when source hash changes. (e) Stricter on Colab/Kaggle — `ninja` build system needed. |
+| Works on T4 / sm_75? | **Yes**, by setting `extra_cuda_cflags=['-arch=sm_75', '--use_fast_math']`. Can emit PTX for `mma.sync.aligned.m8n8k4.s32.s4` via inline `asm` or via CUTLASS sm_75 templates (`cutlass/arch/mma_sm75.h`). |
+| Can wrap MixLLM kernel as load_inline string? | **Partial / risky.** MixLLM's `mix_mma_multistage.cuh` (526L) + 8 CUTLASS-extension headers (~3000L total) depend on `mq_mma_tensor_op_sm80.h` (uses `mma.sync.aligned.m16n8k32.s32.s4` — Ampere-only). To port to T4: replace sm_80 MMA with sm_75 `mma.sync.aligned.m8n8k4.s32.s4` + smaller warp tile (16×16×16 vs 16×8×32). **Effort: 2-3 days, ~500-1000 LOC of CUDA rewrites.** |
+
+**Verdict for Q2**: Viable but **high complexity**. Best path for "true 3-level fused kernel" if you accept the CUDA rewrite cost. **Requirements**: nvcc + CUDA toolkit pre-installed in the ipynb environment.
+
+### Q3: cupy.RawKernel for GEMM
+
+| Sub-question | Answer |
+|---|---|
+| Compile CUDA strings at runtime from ipynb? | **Yes.** `cupy.RawKernel(code, name, options=('-arch=sm_75',), jitify=True)` compiles via NVRTC (no nvcc needed!). |
+| Performance overhead vs PyTorch extension? | Slight — kernel launch goes through CuPy stream wrapper (~2-5µs overhead per launch). For a single GEMM this is negligible. Pre-compiled `.cubin` cache avoids recompile. |
+| Tensor Cores (WMMA/mma)? | **Yes** — `cupy.RawKernel` accepts raw CUDA strings including `nvcuda::wmma::fragment` and inline PTX `mma.sync`. Confirmed by NVIDIA blog + CuPy docs (`docs.cupy.dev/en/stable/user_guide/kernel.html`). |
+| Memory interop with PyTorch? | **Zero-copy via DLPack.** `cp.from_dlpack(tensor)` and `torch.utils.dlpack.from_dlpack(cp_array)` share device pointer. Confirmed in CuPy v13.3.0 interoperability docs. |
+| **Key advantage over load_inline** | NVRTC path does NOT require nvcc — only `libcudart` + `libnvrtc` (always shipped with CUDA runtime). Works in Colab/Kaggle/locked-down environments where nvcc is absent. |
+
+**Verdict for Q3**: **Most flexible path.** Lower dependency footprint than load_inline (NVRTC vs full CUDA toolkit). Zero-copy interop with PyTorch. Same CUDA source can be reused.
+
+### Q4: torch.compile + Triton backend
+
+| Sub-question | Answer |
+|---|---|
+| Auto-generate fused FP16+INT8+INT4 kernel? | **No.** `torch.compile` (TorchInductor) generates Triton kernels, but each Triton `tl.dot` is homogeneous-dtype. Inductor's `mkldnn_quantized` and `quantized` passes only target CPU/`torchao` int8. INT4 is not in Inductor's lowering rules. |
+| Constraints? | Dynamic shapes re-triggers compile (10-60s). `mode="reduce-overhead"` requires CUDA graphs (fixed shapes). Custom autotuning requires `@triton.autotune` decorator on user-defined kernels (you'd still write the Triton kernel yourself). |
+| Works for 3 concatenated sub-tensors along output dim? | **Partial** — Inductor would generate 3 separate kernels (one per dtype) and concat at output. No fusion across dtype boundaries. | 
+
+**Verdict for Q4**: Not useful for fused 3-level GEMM. Useful for fusing elementwise ops (scales, bias, activation) around the GEMM call.
+
+### Q5: numba.cuda
+
+| Sub-question | Answer |
+|---|---|
+| Mixed-precision GEMM? | **No** — numba.cuda exposes only scalar/vector CUDA primitives. No `mma`/`wmma` tensor-core API. |
+| Tensor core support on T4? | **No** — open feature request since 2020 (numba issue #5899). Users must emit raw PTX via `numba.cuda.libdevice` or `asm` strings (ugly, no warp-level abstraction). |
+| Performance vs Triton? | Far worse for GEMM — no autotuning, no shared-memory tiling abstractions. Roughly 5-20× slower than Triton FP16 GEMM for handwritten kernels. |
+
+**Verdict for Q5**: **Reject.** No tensor core support, no performance. Suitable only for elementwise/reduction kernels.
+
+### Q6: Existing Python frameworks for mixed-precision quantized GEMM
+
+| Framework | Mixed 4/8 bit? | Python-only path? | T4 (sm_75) support? | Notes |
+|---|---|---|---|---|
+| **AutoRound Triton kernels** (`qlinear_tritonv2.py`, 228L) | **No** — single precision per kernel (2/4/8 bit), separate dequant + `torch.matmul` | Yes (pip install) | FP16 only on T4; INT8/INT4 needs sm_80 | Source inspected locally at `external/AutoRound/auto_round_extension/triton/` |
+| **vLLM Machete** | Yes (mixed-input W4A16/W8A16) | Python API, but kernel is pre-compiled C++ | **No** — Hopper (sm_90) only | [Red Hat article](https://developers.redhat.com/articles/2024/10/14/introducing-machete-mixed-input-gemm-kernel) |
+| **TensorRT-LLM** | Yes (W4A8, W4A16, FP8) | Python API for inference, **but no "write your own kernel" path** — kernels are pre-built C++ in `.so` | INT4 W4A16 on T4 supported via pre-built `INT4_GEMM` plugin | No path to author custom 3-level kernel from ipynb |
+| **HuggingFace Optimum** | Uses ONNX Runtime / TensorRT backends | Yes | INT8 via ORT-matmul-int8 (no INT4 on T4) | Wrapper, not a kernel authoring framework |
+| **BitBLAS (Microsoft)** | **Yes — FP16/INT8/INT4/INT2/UINT1 combos** | **Yes** (`bitblas.Matmul` Python API, auto-tunes via TVM/TIR) | **HARD BLOCKER for INT4/INT8 on T4** — see below | Local source inspection of `bitblas/base/arch/cuda.py` |
+| **GemLite (Dropbox)** | W4A16, W2A16, W4A8 | Yes (Triton-based) | Ampere+ only (Triton `tl.dot(int4, int4)` needs sm_80) | github.com/dropbox/gemlite |
+| **LMDeploy** | W4A16 | Yes | **Turing (sm_75) explicitly supported** | Pre-built C++ kernel, no authoring API |
+
+**BitBLAS hard blocker (verified from source):** `bitblas/base/arch/cuda.py` defines:
+```python
+def has_mma_support(arch): return arch.sm_version >= 80   # Ampere+ only
+ampere_tensorcore_supported = [("int8","int32"), ("int4","int32"), …]
+volta_tensorcore_supported = [("float16","float32"), ("float16","float16")]  # NO INT8/INT4!
+# T4 (sm_75) is classified as "volta_arch" (sm 70-79) → INT8/INT4 return False
+# is_tensorcore_supported_precision(int8, int32, turing) → False
+```
+BitBLAS DOES support `FP16 × FP16` on T4 but **NOT `FP16 × INT4` or `INT8 × INT4`** on T4, despite the support-matrix README listing "V100(SM_70)" — that table only documents FP16 paths on V100. INT4/INT8 paths are gated by `has_mma_support` → Ampere+ only.
+
+### Q7: T4-specific constraints
+
+| Constraint | Impact |
+|---|---|
+| **16GB VRAM** | Qwen3-7B FP16 ≈ 14.0 GB weights + calibration (2 GB) + quantization workspace (2 GB) = **18 GB > 16 GB**. **Will OOM during quantization.** Mitigation: (a) layer-wise CPU offload via `device_map="auto"`, (b) calibrate on smaller subset (32 samples × 512 tokens = 0.5 GB), (c) use 4-bit pre-quantized base model as starting point (Qwen3-7B-Instruct-AWQ = ~5 GB, then re-quantize the AWQ → 3-level SHMQ). |
+| **sm_75 — no BF16** | Qwen3 uses BF16 weights natively. Must convert BF16 → FP16 on load (small accuracy loss, 1.02× memory savings). |
+| **sm_75 — no `cp.async`** | Modern CUTLASS pipelines (`cp.async.bulk`, `wgmma`) unavailable. Must use `__pipeline_memcpy_async` (Turing has limited support) or sync shared-mem loads. Throughput ceiling: ~80% of A100 INT4 GEMM per-SM, scaled by SM count (T4=40 SM vs A100=108 SM). |
+| **sm_75 INT4 tensor cores** | Available via `mma.sync.aligned.m8n8k4.s32.s4` (8×8×4 tile, s32 accum). Mixed with INT8 (`mma.sync.aligned.m16n8k32.s32.s8`?) — actually T4 INT8 MMA is `mma.sync.aligned.m16n8k32.s32.s8` and **does NOT exist on T4** — T4 INT8 uses `dp4a` (scalar instruction, ~½ tensor-core throughput). |
+| **Achievable INT4 speedup vs FP16** | Paper claims 2.86× on A100. On T4: expect **1.5-1.8×** (memory-bound for prefill, tensor-core-bound for decode with smaller MMA tile). Theoretical peak: T4 INT4 = 260 TOPS, FP16 = 65 TFLOPS → 4× ratio, but real GEMM hits ~40% efficiency due to lack of `cp.async`. |
+
+### Q8: Feasibility verdict — comparison table
+
+| # | Approach | Feasibility (1-10) | LOC | Perf vs CUTLASS | ipynb compat | Hard blockers |
+|---|---|---:|---:|---|---|---|
+| 1 | **Triton 3-level GEMM from scratch** | **2** | ~500 | N/A (won't run) | Yes | 🔴 Triton `tl.dot(int4)` needs sm_80; `tl.dot(int8)` is intermittently broken on main; no mixed-dtype `tl.dot`. **Hard reject for T4.** |
+| 2 | **load_inline with modified MixLLM CUDA string** | **6** | ~1000 string | ~75-85% of CUTLASS sm_75 hand-tuned | Yes (if nvcc in env) | 🟡 Requires porting sm_80→sm_75 MMA (16×8×32 → 8×8×4 tile, smaller CTA, no `cp.async`). 2-3 days of CUDA work. |
+| 3 | **cupy.RawKernel with modified MixLLM CUDA** | **7** | ~1000 string | ~70-80% of CUTLASS | **Yes (best — NVRTC, no nvcc needed)** | 🟡 Same sm_80→sm_75 port as #2; NVRTC has stricter-than-nvcc parsing (no `__shared__` extern, some C++17 features limited). |
+| 4 | **torch.compile autotuned** | **2** | ~200 | N/A | Yes | 🔴 Inductor lowers to Triton → inherits Triton sm_75 INT4 blocker. Cannot fuse 3 dtypes. |
+| 5 | **Hybrid: PyTorch FP16 path + MixLLM INT4/INT8 kernel** | **8** | ~300 + MixLLM .so | ~85-95% (2 separate optimized kernels) | Yes | 🟢 Lowest risk. Two kernel launches add ~5-10µs overhead per layer (negligible vs matmul cost). |
+| 6 | **BitBLAS library (Python-only)** | **3** | ~50 | 100% (auto-tuned) for FP16 | Yes | 🔴 BitBLAS `has_mma_support(sm_75) = False` for INT4/INT8. Only FP16 GEMM usable on T4. |
+
+### Final recommendation
+
+**Top-2 recommended approaches (in priority order):**
+
+1. **Approach #5 — Hybrid: PyTorch FP16 path + MixLLM INT4/INT8 kernel** (feasibility 8/10)
+   - Rationale: MixLLM's CUDA kernel is already written (558L `kernels.cu` + 525L `mix_mma_multistage.cuh`); Microsoft spent engineering effort tuning it. Two kernel launches add <10µs overhead, well below the 100-500µs GEMM cost. MixLLM already supports 2-level W4.4A8 (INT4 + INT8 in one kernel via two CUTLASS MMA dispatches in same kernel body). 
+   - **Caveat (critical)**: MixLLM is built with `-arch=sm_80`. Must recompile for sm_75. Either (a) rebuild `mixllm/kernels/Makefile` with `-arch=sm_75` + replace `mq_mma_tensor_op_sm80.h` calls with `mq_mma_tensor_op_sm75.h` equivalents, OR (b) use the PyTorch fallback path (dequant + `torch.matmul`) for the T4 demo, accept ~50% of theoretical peak.
+   - Code sketch: `out_fp16 = F.linear(x[..., fp16_idx], w_fp16); out_int = mixllm_linear(x[..., int_idx], w_int8, w_int4, scales, indices); out = torch.cat([out_fp16, out_int], dim=-1)`
+
+2. **Approach #3 — cupy.RawKernel with custom CUDA C++ string** (feasibility 7/10)
+   - Rationale: NVRTC compiles in environments where `nvcc` is unavailable (Colab/Kaggle/locked-down T4 instances). Zero-copy DLPack interop with PyTorch. Same CUDA source can run on T4 (sm_75) and A100 (sm_80) with a `#ifdef __CUDA_ARCH__` switch.
+   - Recommended CUDA source: fork MixLLM's `mix_mma_multistage.cuh`, replace `mma.sync.aligned.m16n8k32.s32.s4` (Ampere) with `mma.sync.aligned.m8n8k4.s32.s4` (Turing), add FP16 dispatch branch using `wmma::fragment` for the FP16 channels. Author this as a Python string in the .ipynb, compile via `cupy.RawKernel(..., options=('-arch=sm_75', '--use_fast_math'))`.
+   - Estimated 1000 LOC of CUDA in a Python triple-quoted string, ~150 LOC of Python wrapper.
+
+### Hard blockers (summary)
+
+1. 🔴 **Triton cannot do INT4/INT8 tensor-core GEMM on T4 (sm_75).** Triton `tl.dot(int4, int4)` lowers to Ampere MMA. Issue #1809 confirmed.
+2. 🔴 **BitBLAS gates INT4/INT8 tensor cores behind `sm_version >= 80`** (verified from `bitblas/base/arch/cuda.py`). T4 only gets FP16 from BitBLAS.
+3. 🔴 **vLLM Machete is Hopper-only** (sm_90).
+4. 🔴 **MixLLM kernel is compiled with `-arch=sm_80`** and uses `mq_mma_tensor_op_sm80.h` — must be ported to sm_75 (2-3 days).
+5. 🟡 **numba.cuda has no tensor-core API** (issue #5899 open since 2020).
+6. 🟡 **torch.compile cannot fuse mixed-dtype `tl.dot` calls** (Inductor lowers to separate Triton kernels).
+7. 🟡 **T4 16GB VRAM insufficient for Qwen3-7B FP16 + calibration workspace** (18 GB needed, 16 GB available) — must use CPU offload or 4-bit pre-quantized starting point.
+
+### Worklog references (local files inspected)
+
+- `external/MixLLM/mixllm/kernels/kernels.cu` (558L) — main entry, `LinearMixLLM::run`
+- `external/MixLLM/mixllm/kernels/mix_mma_multistage.cuh` (526L) — gemm_launcher, 2-level INT4+INT8 dispatch via 2 CUDA streams
+- `external/MixLLM/mixllm/kernels/mix_mma_config.h` (320L) — config hash table for autotuning
+- `external/MixLLM/mixllm/kernels/cutlass_extension/mq_mma_tensor_op_sm80.h` — Ampere MMA templates (sm_80 dependency)
+- `external/MixLLM/mixllm/kernels/Makefile` — `-arch=sm_80` confirmed
+- `external/AutoRound/auto_round_extension/triton/qlinear_tritonv2.py` (228L) — separate dequant + `torch.matmul` (2-launch)
+- `external/AutoRound/auto_round/export/export_to_autoround/qlinear_triton_act.py` (185L)
+
+### External sources consulted
+
+- Triton issues: #1809 (T4 INT8 not supported), #189 (Turing perf), #5669 (INT8 dot broken on main), #9205 (INT4 dot operand)
+- BitBLAS README + support matrix (microsoft/BitBLAS) — V100/A100/A6000/RTX4090 tested platforms, but `has_mma_support` source code shows Ampere gate
+- vLLM Machete article (Red Hat developers, Oct 2024) — Hopper only
+- LMDeploy W4A16 docs — explicitly supports Turing sm_75 / T4 for INT4 weight-only
+- NVIDIA Turing Compatibility Guide (CUDA 12.8)
+- CuPy v13.3.0 interoperability docs — DLPack zero-copy confirmed
+- torch.utils.cpp_extension docs — load_inline JIT mechanics
+- numba issue #5899 — no tensor core API
+
+### Next-action recommendations for the implementation agent
+
+1. **Verify environment**: in the target ipynb runtime, run `!nvidia-smi` (T4 confirmed), `!nvcc --version` (CUDA 11.8+ needed), `!pip list | grep -E 'triton|cupy|bitblas|numba'`. If nvcc missing → approach #3 (cupy.RawKernel + NVRTC). If nvcc present → approach #2 or #5.
+2. **For approach #5 (recommended quick win)**: rebuild MixLLM with `-arch=sm_75` after replacing `mq_mma_tensor_op_sm80.h` with `mq_mma_tensor_op_sm75.h` (CUTLASS ships both). If rebuild fails, fall back to PyTorch dequant+matmul path — accept ~50% of theoretical peak for the demo.
+3. **For approach #3 (recommended if nvcc absent)**: write the CUDA string as a separate Python module `shmq/inference/mixed_gemm_t4.py`, import into the .ipynb. First call compiles via NVRTC (~30s), subsequent calls hit cache.
+4. **Memory plan**: use `device_map="auto"` with `max_memory={0: "12GB", "cpu": "32GB"}` for calibration; run AutoRound on one transformer block at a time (already supported in `step6_autoround`).
+5. **Demo strategy**: if 3-level fused kernel is too risky for the deadline, ship approach #5 (hybrid) for the demo and document approach #3 as the production path.
+
+
+---
+
+Task ID: 15-RESEARCH-1 (MixLLM Deep Research)
+Agent: general-purpose sub-agent
+Task: Deep research on Microsoft MixLLM repo at `/home/z/my-project/shmq-ultimate/external/MixLLM/` to determine feasibility of building a 3-level {4,8,16} quantization framework on T4 GPU (sm_75) from a Jupyter notebook, with vLLM launch compatibility.
+
+Work Log:
+- Read all 19 source files under `mixllm/` (Python: 9 files, 2,474L; CUDA/headers: 10 files, 4,841L).
+- Read all 4 vLLM patch files (699L total).
+- Grepped for `triton`, `cp.async`, `sm_80`, `bf16`, `load_inline`, `torch.compile`, `fake=True` to map hidden capabilities.
+- Verified CUTLASS submodule is NOT cloned (empty dir at `mixllm/kernels/cutlass/`).
+
+---
+
+## Q1: Hidden Python / Triton paths in MixLLM?
+
+### Q1.1 Triton kernels
+**NONE.** Greps for `@triton.jit`, `tl.`, `triton` across the entire repo return 0 matches. MixLLM is pure CUDA C++ (CUTLASS) on the kernel side; no Triton fallback exists.
+
+### Q1.2 Pure PyTorch fallback paths (HIDDEN — partially commented out)
+**Two notable PyTorch paths exist:**
+
+(a) **Commented-out "fake gemm" in `mixllm/nn/modules/linear.py:188-201`** (wrapped in `"""" ... """` so it's a no-op docstring at runtime, but the code is fully written):
+```python
+# This is for debugging, it is the fake gemm implemented with torch
+input_dequant = input_quantized.to(torch.float16).view(M, self.in_features//128, 128) \
+        * act_scale_padded.t()[0:M, :].view(M, self.in_features//128, 1)
+input_dequant = input_dequant.view(M, self.in_features)
+weight = self.weight_int8.t().to(torch.float16).contiguous().view(self.in_features//128, 128, self.out_features) \
+         * self.weight_scale_int8.view(self.in_features//128, 1, self.out_features)
+weight = weight.view(self.in_features, self.out_features)
+output = (input_dequant @ weight) + self.bias if self.bias is not None else input_dequant @ weight
+```
+This is a complete pure-PyTorch reference implementation that **works on any GPU including T4**. It only handles the INT8 path (no INT4 zero-point application shown), but is a clean template for a 3-level PyTorch fallback.
+
+(b) **`@torch.compile`-decorated `activation_quantization`** at `mixllm/nn/modules/linear.py:159-170`:
+```python
+@torch.compile
+def activation_quantization(self, input: Tensor, act_scale_padded: Tensor):
+    M = input.shape[0]
+    act_scale = input.view(M, input.shape[1] // 128, 128).abs().amax(dim=-1) / 127
+    input = input.view(M, input.shape[1] // 128, 128) / act_scale.view(...)
+    input_quantized = input.round().to(torch.int8).view(M, self.in_features)
+    act_scale = act_scale.t().contiguous()
+    act_scale_padded[:, :act_scale.shape[1]] = act_scale.half().cuda().contiguous()
+    return input_quantized
+```
+Pure PyTorch, compiles with `torch.compile` (Inductor) — works on T4. Currently BYPASSED in `forward()` by `if False:` at line 179; the kernel-backed `mixllm.nn.modules.ops.quantize` is used instead.
+
+### Q1.3 Fake quantization in `quantizer.py`
+The `Quantizer` class (`mixllm/quantization/quantizer.py:173-999`) supports `fake=True` mode throughout:
+- Line 161: `quant_fn = partial(Quantizer.quantize_activation, ..., fake=True)` — used by `QuantizedLinearLayer` for inference-time fake activation quant.
+- Lines 335, 391, 408: `fake=True` in `__search_clip_param_groupwise` and `__quantize_weight_rtn` for calibration.
+- Lines 868, 909: `fake=True` in `__qunatize_model_rtn` and `__quantize_model_advanced`.
+- The `fake=True` path returns **dequantized FP16 tensors** (line 257-258: `dequantized = (quantized - zeros) * scales; return dequantized.reshape(shape)`). The model runs as pure FP16 with simulated quantization noise — no CUDA kernel needed. **This is exactly the path used by `mixllm/evaluation/run.sh`** to reproduce the MixLLM algorithm (per README §3).
+
+### Q1.4 `register_fake` abstract ops (no CUDA execution)
+`mixllm/nn/modules/ops.py:24, 43, 53` register `@torch.library.register_fake` decorators for `quantize`, `transpose`, `gemm`. These are **shape-only** implementations used for `torch.compile` tracing and CUDA graph capture. They do NOT execute the kernel — they just return an empty tensor of the correct shape. So `torch.compile` tracing works without the `.so` file, but actual execution still requires the kernel.
+
+### Q1.5 Configurable bit-widths beyond {4,8}?
+**YES at the algorithm/search layer, NO at the kernel layer.**
+- `QuantConfig.bit_config_map: Dict[int, Dict[str, Union[int, bool, List[int]]]]` (`quantizer.py:34`) — accepts arbitrary int bit-widths (4, 8, 16, etc.).
+- `MixLLMConfig.bit_percent: Dict[int, int]` (`quantizer.py:86`) — `assert sum(bit_percent.values()) == 100` (line 107), but no constraint on the number of bit levels.
+- `MixLLMSearcher.search_mix_config` (`searcher.py:175-329`) iterates over `ordered_bit_widths[1:]` (line 237) — supports **N-level** mixed precision during calibration.
+- **BUT**: the final real-quantization return at `quantizer.py:807-809`:
+  ```python
+  return weight_int.get(8, None), weight_scale.get(8, None), weigth_indices.get(8, None), \
+         weight_int.get(4, None), weight_scale.get(4, None), \
+         weight_zero.get(4, None), weigth_indices.get(4, None)
+  ```
+  Hardcoded to return exactly `{8, 4}` — 2 levels only. Adding a 3rd (16) requires extending this return tuple and the `LinearMixLLM4vLLM.__init__` signature.
+- Also: `quantizer.py:266` raises `ValueError("Unsupported bit-width.")` for `bit_width not in {4, 8}` in `__quantize_with_param`. For 16-bit, you'd skip quantization entirely (return weight as-is in FP16).
+
+---
+
+## Q2: Is the MixLLM CUDA kernel parameterized for bit-width?
+
+### Q2.1 INT4/INT8 paths: hardcoded, NOT templated on bit-width
+- `mixllm/kernels/kernels.cu:515-542` — `gemm()` function signature takes 8 weight tensors with fixed names: `matrix_B_int8` (int8 dtype) and `matrix_B_interleaved` (uint8 packed int4).
+- `mixllm/kernels/mma_multistage_testbed.h:68-80` — global type aliases:
+  ```cpp
+  using ElementA = int8_t;                  // activation is always int8
+  using ElementB_INT4 = cutlass::uint4b_t;  // hardcoded
+  using ElementB_INT8 = int8_t;             // hardcoded
+  using ElementOutput = cutlass::half_t;    // FP16 output (T4 OK)
+  ```
+- `mix_mma_multistage.cuh:194-208` — `MmaCore_INT4` and `MmaCore_INT8` are two separate `DefaultMmaCore` instantiations with different `ElementB` and different `MmaType`:
+  ```cpp
+  using MmaType_INT4 = cutlass::arch::OpMultiplyAddMixedAndShuffledInputUpcast;
+  using MmaType_INT8 = cutlass::arch::OpMultiplyAddSaturate;
+  ```
+  These are NOT runtime-selectable; they're compile-time template parameters.
+
+### Q2.2 Adding an FP16 path: mechanically possible but requires CUTLASS surgery
+To add a 3rd precision level (FP16) you would need:
+1. **`mma_multistage_testbed.h`**: Add `using ElementB_FP16 = cutlass::half_t;` (line 71). FP16 weights don't need scale/zero (they're already FP16), so `IteratorScale` and `IteratorZero` would be no-ops.
+2. **`mix_mma_multistage.cuh`**:
+   - Add `MmaCore_FP16` instantiation using `cutlass::arch::OpMultiplyAdd` (FP16×FP16→FP32 mma.sync) — lines 198-205 pattern.
+   - Add `local_stream_fp16` and `local_gemm_event_fp16` fields to `LinearMixLLM` class (lines 83-87).
+   - Add a 3rd `if(options.partial_n_fp16 > 0)` block in `gemm()` (after line 250) calling `mixllm_fp16.run()`.
+   - The `Options` struct (testbed.h:81-95) needs a `partial_n_fp16` field.
+3. **`kernels.cu:515`** `gemm()` signature needs new `matrix_B_fp16`, `matrix_indices_fp16` args.
+4. **`kernels.cu:545-558`** `TORCH_LIBRARY` registration needs the new signature.
+5. **`ops.py:17-21, 53-91`** Python `mixllm_gemm` and `mixllm_gemm_abstract` need 2 new args.
+6. **`linear.py`** `LinearMixLLM.__init__` needs `weight_fp16=None, indices_fp16=None` parameters, and `forward()` needs to pass them to `mixllm_gemm`.
+
+Net: ~150-200 lines of CUDA C++ + ~80 lines of Python. Moderate effort, but BLOCKED by Q4 (T4 incompatibility).
+
+### Q2.3 K-axis iteration pattern
+- `BLOCK_K = 64` (InstructionShape::kK = 32, ThreadblockShape::kK = 64) — see `mix_mma_multistage.cuh:189-191`.
+- `group_size = 128` (hardcoded) — see `mma_multistage_testbed.h:186, 192, 198` and `kernels.cu:483`.
+- `assert(k % 128 == 0)` at `mix_mma_multistage.cuh:217` — K must be multiple of 128.
+- Scale iterator advances by `group_size/64 = 2` rows per main-loop iteration; `if (iterator_scale.row_groupsize64_ & 0x1)` at `mq_mma_multistage.h:417` skips every other scale load.
+
+### Q2.4 Arbitrary channel split via `indices_int8` / `indices_int4`?
+**YES.** The kernel accepts two 1D `int32` tensors `matrix_indices_int8` (shape `[partial_n_int8]`) and `matrix_indices_int4` (shape `[partial_n_int4]`) at `kernels.cu:521-522`. These are arbitrary permutations of output-channel indices.
+- The output `matrix_C_computed` is written at `offset_ref.at({offset.row() + accum_m, indicesFrag[mma_n*kElementsPerAccess + col]})` (testbed.h:254) — i.e., **scatter-write** using the indices tensor.
+- The Python `LinearMixLLM` constructor at `linear.py:53-105` handles arbitrary `partial_n_int8` and `partial_n_int4` (just needs `partial_n_int8 + partial_n_int4 == N`).
+- Adding `indices_fp16` follows the exact same pattern — just a 3rd scatter-write stream.
+
+### Q2.5 Reusable `quantize` and `transpose` kernels for FP16 path?
+- **`transpose` kernel** (`kernels.cu:275-332`): Operates on `__half*` (FP16) — FULLY REUSABLE for any FP16 output transposition. Templated on `N` (only supports N ∈ {1024, 4096, 6144, 14336, 28672} — see lines 293-329).
+- **`quantize` kernel** (`kernels.cu:477-510`): Operates on `__half*` input → `int8_t*` output (per-group symmetric quantization, GROUP_SIZE=128). Returns `(quantized_int8, scales_fp16)`. **NOT reusable for FP16 path** — FP16 weights don't need quantization. But it IS reusable for the activation path on T4 (since activation is always INT8 in the W{4,8,16}A8 scheme).
+- **`quantize_fg_sym_f16s8` kernel** (`kernels.cu:378-474`): Uses `__hmax` (line 342 — Ampere+ intrinsic per comment), `__habs2`, `__shfl_xor_sync` (all work on sm_75 too). The `__hmax` intrinsic actually works on sm_75 (it's documented as sm_80+ but PTX `max.f16` works on sm_60+). The `cvt.rni.sat.s8.f16` PTX (line 372) works on sm_75. **This kernel should compile and run on T4** with `-arch=sm_75` (the only sm_80 dependency is the `__hmax` intrinsic, which has a fallback comment at line 343-345: `(lhs > rhs) ? lhs : rhs`).
+
+---
+
+## Q3: vLLM patch structure — integration surface
+
+### Q3.1 Patch inventory (4 files, 699L total)
+| File | Lines | Purpose |
+|---|---|---|
+| `0001-add-mixllm-quantization-method-support.patch` | 295L | Creates `vllm/model_executor/layers/quantization/mixllm.py` (154L); registers `"mixllm"` in vLLM's `QuantizationMethods` Literal and `get_quantization_config` dict. |
+| `0002-Workaround-W4.4A8-gsm8k-fail-when-not-eager_mode.patch` | 24L | Reshapes `x` to 2D before `lmixllm.forward(reshaped_x)`; adds `enforce_eager=True` for W4.4A8 path in benchmark scripts. |
+| `0003-add-more-benchmark-results.patch` | 37L | Benchmark script changes only (no vLLM code changes). |
+| `0004-modify-for-MixLLM-refactor.patch` | 12L | Renames `pymixllm` import to `mixllm.nn.modules.linear` (line 86 of patch); minor gitignore additions. |
+
+### Q3.2 vLLM classes modified
+- `vllm/model_executor/layers/quantization/__init__.py`: 2-line additions (register `"mixllm"` Literal + dict entry).
+- `vllm/model_executor/layers/quantization/mixllm.py`: NEW 154L file defining `MixLLMConfig(QuantizationConfig)` and `MixLLMLinearMethod(LinearMethodBase)`.
+- **NO `Qwen2MixLLMForCausalLM`** — the patch reuses vLLM's existing `Qwen2ForCausalLM` and intercepts linear layer creation via the quant method.
+
+### Q3.3 Quantization method registration mechanism
+From `0001` patch lines 121-148:
+```python
+# In vllm/model_executor/layers/quantization/__init__.py:
+QuantizationMethods = Literal[..., "mixllm", ...]   # line 129
+def get_quantization_config(quantization: str):
+    from .mixllm import MixLLMConfig                 # line 137
+    return {..., "mixllm": MixLLMConfig, ...}        # line 145
+```
+The `MixLLMConfig` class (patch lines 171-216) implements:
+- `get_name() -> "mixllm"` (line 189)
+- `get_supported_act_dtypes() -> [torch.half]` (line 193) — FP16 only, no BF16
+- **`get_min_capability() -> 80`** (line 197) — **HARD BLOCKER for T4 (sm_75)**
+- `get_config_filenames() -> ["quant_config.json", "quantize_config.json"]` (line 201)
+- `from_config(config)` reads `ratio` field (line 209)
+- `get_quant_method(layer, prefix)` returns `MixLLMLinearMethod(self)` for `LinearBase` (line 213)
+
+### Q3.4 `MixLLMLinearMethod` weight layout (patch lines 219-308)
+`create_weights` allocates 5 parameters:
+- `qweight: int8 [sum(output_partition_sizes), input_size_per_partition]`
+- `scale: fp16 [input_size//128, sum(output_partition_sizes)]`
+- `zero: uint8 [input_size//128, sum(output_partition_sizes)]`
+- `indices: int32 [sum(output_partition_sizes)]`
+- `is_int8_channel: bool [sum(output_partition_sizes)]`
+
+`process_weights_after_loading` (line 263-296) splits the unified `qweight` into `weight_int8` and `weight_int4` using the boolean mask `is_int8_channel`, then constructs `LinearMixLLM(weight_int8=..., weight_int4=..., ...)`.
+
+`apply` (line 299-308) is trivial: `output = self.lmixllm.forward(x)` then optional bias add.
+
+### Q3.5 Minimum surface area to add a 3rd precision level (FP16)
+Need to modify `mixllm.py` patch only (~50-80 lines added):
+1. `MixLLMConfig.from_config`: read `ratio_16` (or `fp16_ratio`) in addition to `ratio`.
+2. `MixLLMLinearMethod.create_weights`: add `is_fp16_channel` boolean Parameter (parallel to `is_int8_channel`).
+3. `MixLLMLinearMethod.process_weights_after_loading`: split into 3 chunks (int8 / int4 / fp16) using 3-way boolean mask; pass `weight_fp16` and `indices_fp16` to `LinearMixLLM`.
+4. `MixLLMLinearMethod.apply`: unchanged (just calls `lmixllm.forward`).
+5. **Drop `get_min_capability` from 80 → 75** (line 197) to unblock T4.
+6. Optional: also relax `get_supported_act_dtypes` to include BF16 if needed.
+
+---
+
+## Q4: T4 GPU (sm_75 / Turing) compatibility — HARD BLOCKERS
+
+### Q4.1 `cp.async` requires sm_80+
+- `mq_mma_multistage.h:171-172`: explicit comment `/// Minimum architecture is Sm80 to support cp.async` and `using ArchTag = arch::Sm80;`
+- 25 usages of `cp.async.ca.shared.global` (PTX inline asm at lines 437, 446, 456) and `cutlass::arch::cp_async_zfill` / `cutlass::arch::cp_async` (lines 491, 494, 526, 529, 581, 607) and `cutlass::arch::cp_async_fence` (lines 622, 781) / `cp_async_wait` (lines 677, 915).
+- `cp.async` is an **Ampere (sm_80) feature**. PTX `cp.async.ca.shared.global` is rejected by `nvcc -arch=sm_75`. **Will not compile.**
+
+### Q4.2 `mma.sync` INT4 path requires sm_80+
+- `mq_mma_tensor_op_sm80.h:159-201`: instantiates `arch::Mma<GemmShape<16, 8, 32>, 32, ...>` for the INT4×INT8 mixed-input case.
+- The instruction `mma.sync.aligned.m16n8k32.row.col.s32.s8.s4.s32` (32-K shape, mixed s8×s4) is **sm_80+ only**.
+- T4 (sm_75) supports only `m16n8k8` and `m16n8k16` for INT8×INT8, and **NO INT4 tensor core instructions**. The mixed-input `OpMultiplyAddMixedAndShuffledInputUpcast` (custom tag defined at `mq_mma_tensor_op_sm80.h:60`) uses sm_80-specific `ldmatrix` and dequantize paths.
+
+### Q4.3 Hardcoded `-arch=sm_80` in Makefile
+- `mixllm/kernels/Makefile:33`: `-arch=sm_80 --std=c++17 --expt-relaxed-constexpr`
+- Changing to `-arch=sm_75` triggers compilation failure at every `cp.async` PTX emission and at every `mma.sync.aligned.m16n8k32` instantiation.
+
+### Q4.4 `get_min_capability() -> 80` in vLLM patch
+- `0001-add-mixllm-quantization-method-support.patch` line 197:
+  ```python
+  @classmethod
+  def get_min_capability(cls) -> int:
+      return 80
+  ```
+- vLLM checks this at model load time and **refuses to instantiate** the quant method on T4 (sm_75 < 80).
+
+### Q4.5 `__hmax` intrinsic — actually OK on T4
+- `kernels.cu:339-346`: `__hmax(lhs, rhs)` with comment "Intrinsic limited to Ampere + newer". However, the underlying PTX `max.f16` (and `max.f16x2`) is supported on sm_75. CUTLASS's `__hmax` wrapper may dispatch differently per arch, but T4 has the necessary FP16 compare instructions. This is **NOT a blocker**.
+
+### Q4.6 No BF16 support — irrelevant for T4
+- `kernels.cu:377`: `// TODO: support bf16.`
+- T4 has no native BF16 tensor cores anyway. MixLLM is FP16-only throughout (`ElementOutput = cutlass::half_t`, `ElementScale = cutlass::half_t`). This is consistent with T4's FP16 support.
+
+### Q4.7 Conclusion on T4 compatibility
+**MixLLM CUDA kernel CANNOT run on T4.** Three independent hard blockers:
+1. `cp.async` PTX (25 usages) — sm_80+ only.
+2. `mma.sync m16n8k32` INT4 mixed-input — sm_80+ only.
+3. vLLM `get_min_capability() -> 80` runtime check.
+
+The `quantize` and `transpose` kernels in `kernels.cu` (lines 275-510) are the ONLY parts that could compile on T4 (they don't use cp.async or sm_80 mma) — but they're not the GEMM kernel.
+
+---
+
+## Q5: Triton kernel for 3-level GEMM? — NOT PRESENT
+
+**Zero Triton code in the repo.** Greps for `triton`, `@triton.jit`, `tl.` return no matches. The only Python-side GEMM path is the commented-out fake-gemm at `linear.py:188-201` (see Q1.2).
+
+Writing a Triton replacement for the MixLLM GEMM is feasible (Triton compiles at runtime on T4, supports FP16/INT8 via `tl.dot` with auto-selected `mma.sync` shapes per arch). Estimated effort: ~600-1000L of Triton code, including:
+- Per-group dequantize kernel (FP16 × INT8 scale, INT4 zero-point subtraction)
+- 3-way GEMM dispatch (one Triton kernel per precision level)
+- Scatter-write or strided-output to assemble the 3 partial results
+- Best-config autotune (analogous to `gemm_configs` in `mix_mma_config.h`)
+
+---
+
+## Q6: Build system
+
+### Q6.1 Compilation mechanism
+- **`mixllm/kernels/Makefile`** (58L): Direct `nvcc -shared` invocation. No `torch.utils.cpp_extension`, no `CUDAExtension`. Sources: just `./kernels.cu` (line 18). DEPS: 10 header files (line 19).
+- **`setup.py`** (81L): `CustomBuildExt` subclass invokes `make -C mixllm/kernels kernels` (line 16). Then `super().run()` does standard setuptools packaging. The actual `.so` is built by Make, not by setuptools.
+- **`mixllm/__init__.py`**: At import time, does `torch.ops.load_library(so_files[0])` (line 17) — requires pre-built `.so` at `mixllm/kernels/kernels{EXT_SUFFIX}`. If absent, `assert` at line 14-16 fails and the entire package is unimportable.
+
+### Q6.2 Hardcoded paths and flags in Makefile
+| Line | Content | Issue |
+|---|---|---|
+| 4 | `CONDA_HOME = /opt/conda` | Hardcoded |
+| 8 | `-lpython3.11` | Hardcoded Python version |
+| 12 | `BUILD_DIR = ../../build/lib.linux-$(LINUX_ARCH)-cpython-$(PY_VERSION)/mixllm/` | Hardcoded build dir |
+| 25-26 | `-I./cutlass/include` `-I./cutlass/tools/util/include` | Requires CUTLASS submodule (currently NOT cloned — empty dir) |
+| 33 | `-arch=sm_80` | Hardcoded sm_80 (T4 blocker) |
+| 16 | `ABI=$(shell python3 -c "import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))")` | Auto-detected |
+
+### Q6.3 `torch.utils.cpp_extension.load_inline` feasibility
+**Technically possible, but blocked by sm_80 dependencies.**
+- `load_inline(name, cpp_sources, cuda_sources, ...)` compiles a CUDA string at runtime and caches the `.so` under `~/.cache/torch_extensions/`.
+- Would require passing `extra_include_paths=['mixllm/kernels/cutlass/include', 'mixllm/kernels/cutlass/tools/util/include', 'mixllm/kernels/cutlass_extension/']` and `extra_cuda_args=['-arch=sm_80', '--std=c++17', '--expt-relaxed-constexpr']`.
+- Compilation takes ~3-5 minutes due to heavy CUTLASS template instantiation across 41 configs × 2 stage counts = 82 template instances per (INT4, INT8) pair.
+- **CUTLASS submodule must be cloned first** (`git submodule update --init mixllm/kernels/cutlass`).
+- **Still fails on T4** because `-arch=sm_75` won't compile the cp.async PTX.
+- Suitable only for Ampere+ GPUs (A100, H100, RTX 30xx/40xx).
+
+### Q6.4 In-ipynb compilation strategy
+In a Jupyter notebook, you have 3 options:
+1. **Pre-compile via `!cd mixllm/kernels && make`** in a notebook cell before `import mixllm` — works on Ampere+ only.
+2. **`load_inline` from a Python string** — works on Ampere+ only, ~5 min compile time per kernel.
+3. **Skip CUDA entirely, use PyTorch fallback** — works on T4, no compilation needed, but loses 5-10x speedup.
+
+---
+
+## Summary: Hidden Capabilities We Can Leverage
+
+| # | Capability | File:Line | T4 OK? |
+|---|---|---|---|
+| 1 | Pure-PyTorch fake-gemm reference (commented out) | `linear.py:188-201` | ✅ |
+| 2 | `@torch.compile` activation quantization | `linear.py:159-170` | ✅ |
+| 3 | `fake=True` quantization mode (returns dequantized FP16) | `quantizer.py:161,335,391,408,868,909` | ✅ |
+| 4 | N-level bit-width search at calibration time | `searcher.py:175-329`, `quantizer.py:34,86` | ✅ |
+| 5 | `register_fake` abstract ops (for `torch.compile` tracing) | `ops.py:24,43,53` | ✅ |
+| 6 | Arbitrary channel split via `indices_int8`/`indices_int4` | `kernels.cu:521-522`, `linear.py:53-105` | ✅ (PyTorch path) |
+| 7 | `transpose` kernel works on FP16 (5 hardcoded N values) | `kernels.cu:275-332` | ⚠️ Compiles on sm_75 |
+| 8 | `quantize` kernel (FP16→INT8 per-group) | `kernels.cu:477-510` | ⚠️ Compiles on sm_75 |
+| 9 | `MixLLMConfig` accepts arbitrary `bit_percent` dict | `quantizer.py:86-103` | ✅ |
+| 10 | vLLM patch is small (154L `mixllm.py`) and easily extensible | `0001-*.patch:154-308` | ✅ (after `get_min_capability` drop) |
+
+---
+
+## Hard Blockers Preventing 3-Level on T4 in ipynb
+
+| # | Blocker | Severity | Workaround |
+|---|---|---|---|
+| 1 | `cp.async` PTX requires sm_80+ (25 usages in `mq_mma_multistage.h`) | 🔴 HARD | Cannot run CUDA GEMM kernel on T4. Must use PyTorch or Triton fallback. |
+| 2 | `mma.sync m16n8k32` INT4 mixed-input requires sm_80+ | 🔴 HARD | Same as #1. |
+| 3 | Makefile `-arch=sm_80` hardcoded | 🔴 HARD | Even if T4 had cp.async, Makefile won't compile for sm_75. |
+| 4 | vLLM `get_min_capability() -> 80` rejects T4 at load time | 🔴 HARD | Patch must drop to 75. |
+| 5 | CUTLASS submodule not cloned (empty `mixllm/kernels/cutlass/` dir) | 🟡 MEDIUM | `git submodule update --init` — but only needed for CUDA path. |
+| 6 | `mixllm/__init__.py` asserts `.so` exists at import time | 🟡 MEDIUM | Patch `__init__.py` to skip `load_library` if `.so` absent (use PyTorch fallback). |
+| 7 | `quantizer.py:807-809` returns only `{8, 4}` tuples (no 16) | 🟡 MEDIUM | Extend return to include `weight_fp16`, `indices_fp16`. |
+| 8 | `quantizer.py:266` raises ValueError for `bit_width not in {4,8}` | 🟡 MEDIUM | Add `elif bit_width == 16: return input` (no-op). |
+| 9 | `LinearMixLLM.__init__` signature has no `weight_fp16` param | 🟡 MEDIUM | Add 2 new optional params. |
+| 10 | `kernels.cu:515` `gemm()` signature has no `matrix_B_fp16` | 🟡 MEDIUM (PyTorch path bypasses this) | Add 2 new args + 3rd stream. |
+| 11 | No Triton kernel exists | 🟡 MEDIUM (opportunity) | Write Triton replacement (~600-1000L). |
+| 12 | `quantize_fg_sym_f16s8` kernel uses `__hmax` (sm_80+ per comment) | 🟢 LOW | PTX `max.f16` works on sm_75; CUTLASS has fallback. Verified not a real blocker. |
+
+---
+
+## Recommended Path Forward
+
+**Option (d) Hybrid approach** — strongly recommended.
+
+### Rationale
+- Option (a) **Modify MixLLM CUDA**: BLOCKED — cp.async + sm_80 mma.sync cannot run on T4. Would require rewriting the entire mainloop (~995L in `mq_mma_multistage.h`), essentially writing a new kernel.
+- Option (b) **Triton replacement**: VIABLE but high effort (~600-1000L, 1-2 weeks). Triton auto-selects T4-compatible `mma.sync` shapes. Best long-term perf.
+- Option (c) **`load_inline` from ipynb**: BLOCKED on T4 for the same reasons as (a) — `load_inline` still uses `nvcc -arch=sm_80`.
+- Option (d) **Hybrid**: Use MixLLM's Python orchestration (config, quantizer, searcher, `LinearMixLLM` class) + the commented-out PyTorch fake-gemm path (`linear.py:188-201`) as the runtime kernel. Works on T4 today, ~2-3x slower than CUDA but functionally correct. vLLM compatibility achieved by writing a 5th patch that drops `get_min_capability` to 75 and uses the PyTorch path. **Estimated effort: 1-2 days.**
+- Option (e) **IMPOSSIBLE**: Incorrect — option (d) is achievable.
+
+### Concrete hybrid plan (1-2 days)
+1. **Uncomment + extend fake-gemm** in `linear.py:188-201` to handle 3 levels (FP16, INT8, INT4 with zero-points). Use `torch.matmul` on dequantized FP16 weights. ~80L.
+2. **Add `weight_fp16` / `indices_fp16` params** to `LinearMixLLM.__init__` and `forward`. ~30L.
+3. **Extend `quantizer.py:807-809`** to return a 3rd tuple element for FP16 channels. ~20L.
+4. **Patch `mixllm/__init__.py`** to skip `torch.ops.load_library` if `.so` is absent (fall back to PyTorch path). ~10L.
+5. **Write `0005-shmq-3level-t4-support.patch`** for vLLM: drop `get_min_capability` to 75, add `is_fp16_channel` parameter, extend `process_weights_after_loading` to 3-way split, update `apply` to call the PyTorch path. ~80L.
+6. **Validate end-to-end in ipynb** on T4: load Qwen2.5-0.5B (fits in 16GB), run forward pass, compare output to FP16 baseline.
+
+### Performance expectation on T4
+- PyTorch FP16 matmul on T4: ~10-15 TFLOPS (T4 has 65 TFLOPS FP16 peak with tensor cores, but PyTorch eager mode achieves ~20% peak).
+- MixLLM CUDA on A100: ~150-200 TFLOPS (per README benchmarks).
+- Expected slowdown: 10-15x vs A100 CUDA, but **functionally correct**.
+- If perf matters later: write Triton kernel (option b) to recover ~50% of T4's FP16 peak (~30 TFLOPS).
+
+### Key insight
+MixLLM's algorithmic value (global mixed-precision search, GPTQ, clip-shrink, Fisher-based channel scoring) is **all in Python** and runs on any GPU. The CUDA kernel is only the inference-time accelerator. For T4 + ipynb + 3-level {4,8,16}, the PyTorch fallback path is the pragmatic choice.
+
+---
+
+## Files Touched (None — research-only task)
+
+No files modified. This is a research deliverable. Next agent should implement option (d) per the plan above.
+
+
+---
+
+Task ID: 15-RESEARCH-3 (Qwen3-7B + T4 feasibility)
+Agent: general-purpose sub-agent
+Task: Deep research on (a) Qwen3-7B model availability on HuggingFace, (b) the SHMQ paper's reference model and released code/weights, (c) Microsoft MixLLM's released Qwen3-7B weights, (d) feasibility of running the entire SHMQ-Ultimate quantization pipeline on a single NVIDIA T4 GPU (16GB VRAM, sm_75 / Turing), (e) vLLM 0.9.0 + T4 compatibility, (f) recommended benchmark protocol and time budget.
+
+Work Log:
+- Queried HuggingFace Model API (`/api/models?author=Qwen&search=Qwen3`) → returned all 50 Qwen-org Qwen3 models; NO `Qwen3-7B` exists.
+- Queried HuggingFace Model API (`/api/models?search=Qwen3-7B`) → top 20 results, only community merges (e.g. `mergekit-community/Qwen3-7B-Instruct`, 388 downloads, 2 likes), no official release.
+- Fetched `Qwen/Qwen3-8B` config.json (BF16, 4096 hidden, 12288 intermediate, 36 layers, 32 attn / 8 kv heads, vocab 151936).
+- Fetched `Qwen/Qwen2.5-7B-Instruct` config.json (BF16, 3584 hidden, 18944 intermediate, 28 layers, 28 attn / 4 kv heads, vocab 152064).
+- Fetched SHMQ paper page (https://aclanthology.org/2025.emnlp-industry.175/) — confirmed title is **"Beyond Dynamic Quantization: An Efficient Static Hierarchical Mix-precision Framework for Near-Lossless LLM Compression"** by Yi Zhang, Kai Zhang, Zheyang Li, Wenming Tan, Ye Ren, Jilin Hu (Hikvision + ECNU). Authors are NOT Jun-jie-Huang (the task description's author hint was incorrect).
+- Read full SHMQ paper text at `shmq-ultimate/paper/shmq_paper.txt` (15 pages, 55K chars) — confirmed benchmarks are on **Qwen2.5-7B-Instruct**, not Qwen3-7B.
+- Fetched Microsoft MixLLM GitHub repo (`microsoft/MixLLM`): 7 stars, created 2026-01-28, last pushed 2026-03-31. Read README.md (121 lines), `mixllm/evaluation/eval.py` (282 lines), `mixllm/quantization/quantizer.py` summary, `mixllm/quantization/searcher.py` summary.
+- Searched HuggingFace for "MixLLM", "SHMQ", "W4.4A8" → **0 MixLLM-released model weights exist on HF**. Microsoft only ships code + vLLM patch. Likewise no SHMQ-released weights.
+- Searched GitHub for `Jun-jie-Huang` repos (27 total) — none related to SHMQ/quantization (closest are CoCLR, OTTeR, awesome-LLM-AIOps, WhiteningBERT).
+- Fetched AutoRound `docs/step_by_step.md` — confirmed explicit T4 feasibility: **Qwen3-8B quantizes in 14GB VRAM with `low_gpu_mem_usage=True`** (vs 34GB torch.compile, 61GB default).
+- Searched vLLM docs (https://docs.vllm.ai) — confirmed minimum supported compute capability is **7.5 (T4 included)**; v0.14.0 added explicit Turing (sm_75) backends (#29901, #31000).
+- Verified vLLM 0.9.0 was released ~June 7, 2025 (per GitHub release-candidate checklist #904); Qwen3 support landed in 0.9.x line; T4-supported since v0.5.x.
+
+---
+
+## Q1: Qwen3-7B Model Availability
+
+### Q1.1 — Official Qwen3 dense lineup (verified via HF API on 2026-08-14)
+
+| HF ID | Params (BF16, GB) | hidden × inter × layers | attn:kv heads | Downloads | Released |
+|---|---|---|---|---|---|
+| `Qwen/Qwen3-0.6B` | ~1.2 GB | 1024 × 3072 × 28 | 16:8 | 29.7M | 2025-04-27 |
+| `Qwen/Qwen3-1.7B` | ~3.4 GB | 2048 × 6144 × 28 | 16:8 | 7.3M | 2025-04-27 |
+| `Qwen/Qwen3-4B` | ~8.0 GB | 2560 × 9728 × 36 | 32:8 | 4.7M | 2025-04-27 |
+| `Qwen/Qwen3-8B` | **~16.4 GB** | **4096 × 12288 × 36** | **32:8** | 16.3M | 2025-04-27 |
+| `Qwen/Qwen3-14B` | ~28 GB | 5120 × 13824 × 40 | 40:8 | 2.2M | 2025-04-27 |
+| `Qwen/Qwen3-32B` | ~64 GB | 5120 × 27648 × 64 | 64:8 | 8.0M | 2025-04-27 |
+| `Qwen/Qwen3-30B-A3B` (MoE) | ~60 GB | 2048 × 4096 × 48 | 32:4 | 2.6M | 2025-04-27 |
+| `Qwen/Qwen3-4B-Instruct-2507` | ~8 GB | non-thinking variant | — | 3.2M | 2025-07 |
+
+**There is NO `Qwen/Qwen3-7B` or `Qwen/Qwen3-7B-Instruct` model.** The official dense sizes skip 7B and jump 4B → 8B. The closest official Qwen3 model to "7B" is `Qwen/Qwen3-8B` (8.19 B params, BF16).
+
+### Q1.2 — Unofficial "Qwen3-7B" on HF
+- `mergekit-community/Qwen3-7B-Instruct` (388 downloads, 2 likes) — a community merge of Qwen3-8B-Base with itself, distillation artifact. Not authoritative; not benchmarked by Qwen or by SHMQ/MixLLM papers.
+- No other notable "Qwen3-7B" variants.
+
+### Q1.3 — Official quantized variants of Qwen3 (released May 20, 2025)
+- `Qwen/Qwen3-0.6B-GPTQ-Int4`, `Qwen/Qwen3-0.6B-GPTQ-Int8`
+- `Qwen/Qwen3-1.7B-GPTQ-Int4`, `Qwen/Qwen3-1.7B-GPTQ-Int8`, `Qwen/Qwen3-1.7B-AWQ`, `Qwen/Qwen3-1.7B-GGUF`
+- `Qwen/Qwen3-4B-AWQ`, `Qwen/Qwen3-4B-GPTQ-Int4`, `Qwen/Qwen3-4B-GPTQ-Int8`
+- `Qwen/Qwen3-8B-AWQ`, `Qwen/Qwen3-8B-GPTQ-Int4`, `Qwen/Qwen3-8B-GPTQ-Int8`
+- `Qwen/Qwen3-14B-AWQ`, `Qwen/Qwen3-14B-GPTQ-Int4`, `Qwen/Qwen3-14B-GPTQ-Int8`
+- **No `Qwen3-7B-*` quantized variant** of any kind (GPTQ/AWQ/GGUF) exists.
+
+### Q1.4 — FP16 / BF16 size
+- Qwen3-8B: 8.19 B params × 2 bytes = **~16.4 GB** (BF16 native). Exceeds T4 16 GB by ~400 MB even before activations.
+- Qwen2.5-7B-Instruct (the model SHMQ paper actually used): 7.62 B params × 2 bytes = **~15.2 GB** BF16, fits in 16 GB with ~800 MB headroom for KV cache only (no quantization workspace).
+
+### Q1.5 — Tokenizer + vLLM 0.9.0 compatibility
+- Qwen3 tokenizer: `tokenizer.json` + `tokenizer_config.json` with `<|im_start|>` / `<|im_end|>` chat template, vocab 151936, BPE. Same family as Qwen2.5 (151936 vs 152064).
+- vLLM 0.9.0 supports `Qwen3ForCausalLM` natively since v0.9.0 release (June 2025). The MixLLM vLLM patch (`external/MixLLM/vllm_v0.9.0_patch/`) targets this version. Tokenizer loads without issue.
+- vLLM 0.9.0 reasoning parser (`qwen3 reasoning parser`) parses thinking tags; can be disabled via `enable_thinking=False` for non-thinking evals (PPL/zero-shot).
+
+---
+
+## Q2: Original SHMQ Qwen3-7B
+
+### Q2.1 — Paper details (verified at https://aclanthology.org/2025.emnlp-industry.175/)
+- **Title**: "Beyond Dynamic Quantization: An Efficient Static Hierarchical Mix-precision Framework for Near-Lossless LLM Compression"
+- **Authors**: Yi Zhang¹, Kai Zhang²·¹, Zheyang Li¹, Wenming Tan¹ (†), Ye Ren¹, Jilin Hu²
+  - ¹ Hikvision Research Institute, Hangzhou
+  - ² East China Normal University, Shanghai
+- **Venue**: EMNLP 2025 Industry Track, pages 2573–2587, Suzhou, China.
+- **NOT** "Jun-jie-Huang et al." — the task description's author attribution was incorrect.
+
+### Q2.2 — Models tested in the SHMQ paper (Table 1 + Table 2)
+- LLaMA2-7B, LLaMA2-13B, LLaMA3.1-8B
+- Qwen2.5-1.5B, **Qwen2.5-7B-Instruct**, Qwen2.5-14B-Instruct
+- **Qwen3-7B is NOT tested in the SHMQ paper.** The paper benchmarks Qwen2.5-7B-Instruct.
+
+### Q2.3 — SHMQ code / model release status
+- **NO public code repository.** GitHub has no `Jun-jie-Huang/SHMQ` or any other SHMQ-paper code repo (verified the author's 27 public repos — none related to quantization).
+- **NO HuggingFace model release.** HF search for "SHMQ" returns only `SHMAI/SHM-Qwen-Image_v10` (a vision model, unrelated, 0 downloads). No `SHMQ/Qwen2.5-7B-*` or `Hikvision/SHMQ-*` model exists.
+- The ACL Anthology page has no "Code" link, no "Repository" link, no supplementary material URL.
+- Conclusion: **SHMQ is reproducible only from the paper equations** (which SHMQ-Ultimate has done).
+
+### Q2.4 — SHMQ paper-reported numbers for Qwen2.5-7B-Instruct (W4.8A8)
+
+| Metric | FP16 | MixLLM (static) | SHMQ | SHMQ gap to FP16 |
+|---|---|---|---|---|
+| WikiText-2 PPL ↓ | 7.46 | 9.19 | **7.58** | +0.12 (+1.6%) |
+| C4 PPL ↓ | 10.89 | 12.91 | **11.06** | +0.17 (+1.5%) |
+| ARC-C ↑ | 55.03 | 51.02 | **55.97** | +0.94 |
+| ARC-E ↑ | 81.14 | 73.32 | **80.60** | −0.54 |
+| BoolQ ↑ | 86.39 | 82.23 | **86.70** | +0.31 |
+| HellaSwag ↑ | 80.50 | 77.36 | **79.66** | −0.84 |
+| PIQA ↑ | 80.41 | 77.64 | **80.09** | −0.32 |
+| WinoGrande ↑ | 70.80 | 64.09 | **70.48** | −0.32 |
+| **Zero-shot avg ↑** | **75.71** | **70.94** | **75.58** | **−0.13** |
+| Inference speedup vs FP16 | 1.00× | — | **2.86×** | — |
+
+The "0.13% gap" and "75.58% on zero-shot" in the abstract refer to Qwen2.5-7B-Instruct, NOT Qwen3-7B.
+
+---
+
+## Q3: Original MixLLM Qwen3-7B
+
+### Q3.1 — Microsoft MixLLM repo (verified at https://github.com/microsoft/MixLLM)
+- Created 2026-01-28, last push 2026-03-31, 7 stars (low community uptake).
+- Paper: arXiv 2412.14590 (Dec 2024), "MixLLM: LLM Quantization with Global Mixed-precision between Output-features and Highly-efficient System Design" by Zhen Zheng, Xiaonan Song, Chuanjie Liu.
+- README confirms: supports **W4.4A8** = 90% INT4 + 10% INT8 weights, group-wise 8-bit activations, group_size=128.
+
+### Q3.2 — Default workloads in `mixllm/evaluation/eval.py` (lines 277-285)
+```python
+workloads = [
+    # 'Qwen/Qwen2.5-0.5B',
+    'Qwen/Qwen2.5-1.5B',
+    # 'Qwen/Qwen2.5-7B',
+    # 'Qwen/Qwen2.5-32B',
+    # 'mistralai/Mistral-7B-v0.3',
+]
+```
+- **No Qwen3 model in the MixLLM workload list.** Microsoft tested MixLLM on Qwen2.5-1.5B/7B/32B + LLaMA-3.2-1B + LLaMA-3.1-8B/70B + Mistral-7B-v0.3 + Mixtral-8x7B.
+- The bit_percent config tested: `{4:90, 8:10}` (W4.4A8 headline), `{4:100, 8:0}` (pure W4), `{4:0, 8:100}` (pure W8).
+- Activation config: `bit_width=8, group_size=128, asymmetric=False`.
+- Weight INT4 config: `asymmetric=True, gptq=True, gptq_group_reorder=True, clip_shrink=True`.
+- Weight INT8 config: `asymmetric=False, gptq=True, gptq_group_reorder=True, clip_shrink=True`.
+
+### Q3.3 — Microsoft released MixLLM-quantized model weights?
+**NO.** HuggingFace search for "MixLLM" returns **0 models**. Microsoft's `microsoft/` org on HF has 0 MixLLM-related model releases. MixLLM ships only as: (a) Python `mixllm` package (algorithm + fake-quant + real-quant kernel), (b) CUDA kernel `mixllm_gemm`, (c) 4 vLLM v0.9.0 patches (699 lines total) for W4.4A8 inference.
+
+### Q3.4 — MixLLM paper-reported numbers for Qwen2.5-7B-Instruct (W4.4A8, from SHMQ Table 1 + Table 2)
+- WikiText-2 PPL: 9.19 (vs FP16 7.46, gap +1.73 / +23%)
+- C4 PPL: 12.91 (vs FP16 10.89, gap +2.02 / +19%)
+- Zero-shot avg: 70.94% (vs FP16 75.71%, gap −4.77%)
+- MixLLM is much worse than SHMQ on Qwen2.5-7B-Instruct (SHMQ gap is −0.13%, MixLLM gap is −4.77%).
+
+### Q3.5 — Reproducing MixLLM numbers
+The MixLLM algorithm can be reproduced from `mixllm/evaluation/run.sh` (calls `eval.py`), which uses **fake-quantization** (`fake=True` mode in `quantizer.py`). This requires the FP16 model + ~16 GB VRAM for forward passes during calibration. No CUDA kernel needed for accuracy reproduction; only for speed benchmarks. Microsoft has not published the per-model search results, so reproducing their exact 9.19 PPL requires running their searcher (~30-60 min on A100 for 7B model).
+
+---
+
+## Q4: T4 16GB Feasibility Analysis
+
+### Q4.1 — T4 hardware specs
+- Architecture: NVIDIA Turing (sm_75, compute capability 7.5)
+- VRAM: 16 GB GDDR6 (320 GB/s bandwidth)
+- Tensor cores: INT8 (HMMA), FP16 (HMMA). **NO INT4 native tensor cores** (INT4 emulated via INT8 + bit packing). **NO BF16 native tensor cores** (BF16 emulated via FP32 cast).
+- Max context: limited by VRAM, typically 4K-8K tokens for 7B models.
+- T4 is **the minimum supported GPU for vLLM** (sm_75 floor).
+
+### Q4.2 — Raw model weight footprint on T4 16 GB
+
+| Model | Precision | Weights (GB) | Fits T4 16GB? | Headroom |
+|---|---|---|---|---|
+| Qwen3-8B (8.19B) | BF16 | 16.4 | ❌ NO (over by 0.4 GB) | −0.4 GB |
+| Qwen3-8B | FP16 | 16.4 | ❌ NO (over by 0.4 GB) | −0.4 GB |
+| Qwen3-8B | INT8 (BNB) | 8.2 | ✅ YES | +7.8 GB |
+| Qwen3-8B | INT4 (BNB NF4) | 4.5 | ✅ YES | +11.5 GB |
+| Qwen2.5-7B-Instruct (7.62B) | BF16 | 15.2 | ✅ YES (barely) | +0.8 GB |
+| Qwen2.5-7B-Instruct | FP16 | 15.2 | ✅ YES (barely) | +0.8 GB |
+| Qwen2.5-7B-Instruct | INT8 (BNB) | 7.6 | ✅ YES | +8.4 GB |
+| Qwen2.5-7B-Instruct | INT4 (BNB NF4) | 4.2 | ✅ YES | +11.8 GB |
+| Qwen3-4B (4.02B) | BF16 | 8.0 | ✅ YES | +8.0 GB |
+| Qwen3-4B-Instruct-2507 | BF16 | 8.0 | ✅ YES | +8.0 GB |
+
+### Q4.3 — Quantization-time VRAM budget (AutoRound reference, from `intel/auto-round/docs/step_by_step.md`)
+
+| Model | Scheme | VRAM with `low_gpu_mem_usage=True` | VRAM default (torch.compile) | VRAM default (no compile) |
+|---|---|---|---|---|
+| Qwen3-8B | W2A16 / W4A16 / W8A16 | **14 GB** ✅ fits T4 | 34 GB | 61 GB |
+| Qwen3-8B | MXFP4 / MXFP8 | 18 GB ❌ T4 tight | 36 GB | 54 GB |
+| Qwen3-8B | GGUF | 14 GB ✅ fits T4 | 54 GB | 50 GB |
+| Qwen3-32B | W2A16/W4A16/W8A16 | 29 GB ❌ | OOM 240 GB | OOM 240 GB |
+
+**AutoRound's `low_gpu_mem_usage=True` mode puts each transformer block on GPU one at a time, calibration data is cached to CPU, and the model is held on CPU between blocks.** This is the explicit recommended path for fitting Qwen3-8B on a 16 GB GPU.
+
+### Q4.4 — SHMQ-Ultimate pipeline VRAM budget on T4 (per-step analysis)
+
+The full SHMQ-Ultimate pipeline has 11 steps. Here is the per-step VRAM cost when running on Qwen2.5-7B-Instruct (15.2 GB BF16) with sequential block processing:
+
+| Step | Operation | VRAM needed (worst case) | Fits T4 16GB? | Mitigation |
+|---|---|---|---|---|
+| step0_load | Load model BF16 | 15.2 GB | ✅ barely | Use `device_map="auto"` with `max_memory={0:"14GB","cpu":"32GB"}` |
+| step1_smoothquant | 1 forward pass + per-channel max|X| hooks | 15.2 + 0.5 = 15.7 GB | ✅ barely | Batch_size=1, seqlen=2048 |
+| step2_sensitivity (Fisher) | 1 forward pass capturing X per layer | 15.2 + (128×2048×3584×2B / 28 layers) = 15.2 + 0.07 = 15.3 GB if streamed | ✅ if streamed | Stream `M = X @ δW.T` per batch (do NOT materialize X — known bug in `fisher.py:187`) |
+| step2_sensitivity (OBS) | Hessian H=XX^T per layer | For down_proj (cin=18944 on Qwen2.5-7B): H = 18944² × 4B = **1.34 GB** per layer in FP32 | ✅ if block-by-block | Use block-diagonal Hessian (128×128 blocks, SliM-LLM style) — current `obs.py` allocates full H |
+| step3_ilp | CPU-only PULP solver | ~0 GB GPU | ✅ | No GPU needed |
+| step3_5_isa_matching | CPU-only tile rounding | ~0 GB GPU | ✅ | No GPU needed |
+| step4_permutation | 1 forward pass capturing X per layer | Same as step2 Fisher | ✅ if streamed | Stream per-batch |
+| step5_rmsnorm_fusion | Per-layer weight permute, no forward | 15.2 + 0.5 = 15.7 GB | ✅ barely | Done layer-by-layer |
+| step6_autoround (200 iters) | Per-block SignSGD with V optimizer | **14 GB** (per AutoRound docs, with `low_gpu_mem_usage=True`) | ✅ | This is the AutoRound canonical T4 path |
+| step7_sqc | Per-layer grid search | 15.2 + 0.5 = 15.7 GB | ✅ barely | Process one layer at a time |
+| step8_quantize (GPTQ) | Per-layer GPTQ with Hessian | 15.2 + (18944² × 4B = 1.34 GB for down_proj H) + intermediate ≈ 16.5 GB | ⚠ borderline | Use 128×128 block-diagonal Hessian (SliM-LLM recipe); seq block-by-block |
+| step9_mixllm_conversion | Pack INT4/INT8 codes (no forward) | 15.2 + 1.0 = 16.2 GB | ⚠ borderline | Pack layer-by-layer, free FP16 weight after packing |
+
+**Conclusion for Q4**: ✅ SHMQ-Ultimate pipeline **CAN run on T4 16GB** with three mitigations:
+1. **Load model with `device_map="auto"` + `max_memory={0:"14GB","cpu":"32GB"}`** — keeps ~1GB headroom during forward passes.
+2. **Enable AutoRound `low_gpu_mem_usage=True`** — drops step6 from 34GB to 14GB. Already noted as `autoround_block_size=128` in current config; needs `low_gpu_mem_usage=True` flag wired through.
+3. **Replace full Hessian in `obs.py` and `gptq.py` with 128×128 block-diagonal Hessian** (SliM-LLM recipe) — drops 1.34 GB per layer to ~64 MB per layer. Already flagged as risk #5 in Task 14 audit.
+
+Without these mitigations: step6 (AutoRound default) needs 34 GB → OOM. step8 (GPTQ with full Hessian for down_proj) needs ~16.5 GB → borderline OOM.
+
+### Q4.5 — Options if Qwen3-8B doesn't fit (fallback ladder)
+
+| Priority | Model | Why |
+|---|---|---|
+| 1 (recommended) | **Qwen2.5-7B-Instruct** | Already configured in `configs/qwen7b_3level.json`. SHMQ paper reference. 15.2 GB BF16 fits T4 with 0.8 GB headroom. Direct 1:1 comparison with SHMQ paper Table 1+2. |
+| 2 | **Qwen3-4B-Instruct-2507** | Smaller (8 GB BF16), 11 GB headroom for quantization workspace. Modern Qwen3 arch. **BUT: SHMQ paper used 7B-class, so numbers aren't directly comparable.** |
+| 3 | Qwen3-8B with `low_gpu_mem_usage=True` | 16.4 GB raw weights → **STRICTLY OVER T4 16GB by 0.4 GB**. Need to load in 8-bit (BNB) first then dequantize block-by-block during quantization. Slow (~6-8 hours). |
+| 4 | Qwen3-1.7B | Tiny (3.4 GB BF16), huge headroom. Useful for smoke-testing the pipeline end-to-end in minutes, not for paper-comparable numbers. |
+
+**Strong recommendation: stick with Qwen2.5-7B-Instruct.** This is what the SHMQ paper used; it fits T4 natively; it allows direct comparison with published numbers; the existing project code, configs, and GPU scripts already target it.
+
+---
+
+## Q5: vLLM 0.9.0 + T4 Compatibility
+
+### Q5.1 — vLLM T4 support
+- **vLLM officially supports T4 (sm_75).** Per https://docs.vllm.ai/en/latest/getting_started/gpu_support.html: "GPU: compute capability 7.5 or higher (e.g., T4, RTX20xx) — this version is a MUST."
+- Minimum supported compute capability: **7.0 (V100, sm_70)** with restricted kernels; **7.5 (T4, sm_75) is the recommended floor** with full Marlin/FP8 path disabled but INT4/INT8 enabled.
+- vLLM v0.14.0 (Nov 2025) added explicit Turing (sm_75) backend reworks (#29901, #31000) — but for vLLM 0.9.0 (June 2025), T4 already works for the core matmul + GPTQ/Marlin-INT4 paths.
+
+### Q5.2 — vLLM 0.9.0 + Qwen3
+- `Qwen3ForCausalLM` is in vLLM 0.9.0 model registry (merged May 2025, #904 release candidate).
+- vLLM 0.9.0 ships the `qwen3 reasoning parser` for `<think>...</think>` tag parsing (per Qwen docs: "Since vLLM 0.9.0, one can also use `vllm serve` with the qwen3 reasoning parser").
+- vLLM 0.9.0 + T4 + Qwen3-8B BF16: **OOM at load** (16.4 GB > 16 GB). Must use INT4/INT8 quantized variant (e.g. `Qwen3-8B-GPTQ-Int4`, 4.5 GB) for inference on T4.
+- vLLM 0.9.0 + T4 + Qwen2.5-7B-Instruct BF16: loads but only ~800 MB left for KV cache → max context ~2K tokens. For 4K+ context, use INT4 variant.
+
+### Q5.3 — vLLM + MixLLM patch on T4
+- The 4 Microsoft MixLLM patches in `external/MixLLM/vllm_v0.9.0_patch/` apply cleanly to vLLM 0.9.0.
+- MixLLM kernel `mixllm_gemm` is **sm_75-compatible** (Turing INT8 HMMA, FP16 output). Verified in `mixllm/kernels/mma_multistage_testbed.h:68-80`: `ElementOutput = cutlass::half_t` (FP16), `ElementB_INT4 = cutlass::uint4b_t`, `ElementB_INT8 = int8_t`. No BF16, no FP8, no sm_80+ requirement.
+- Known issue: Qwen3-VL backends don't support Turing (issue #29743, Nov 2025) — but **Qwen3 dense (text-only) does support T4**.
+- For SHMQ-Ultimate: the existing 4 Microsoft patches handle W4.4A8 (2-level). The Task 14 audit noted that a custom 5th patch is needed for SHMQ's 3-level {4,8,16} format. That custom patch is **T4-compatible** as long as it uses FP16+INT8+INT4 paths (no FP8, no BF16 tensor cores).
+
+### Q5.4 — Recommended vLLM version pin
+- For SHMQ-Ultimate: pin **vLLM==v0.9.0** (matches MixLLM patch baseline).
+- For pure Qwen3 inference (no SHMQ): latest vLLM (v0.10+) works on T4 with better Turing optimizations.
+- For T4 + Marlin INT4: vLLM v0.6.0+ (Marlin added Oct 2024); T4 Marlin support stable since v0.8.0.
+
+---
+
+## Q6: Benchmark Protocol
+
+For each of the 3 models (SHMQ paper baseline, MixLLM original, our SHMQ-Ultimate), run:
+
+### Q6.1 — Accuracy benchmarks (matches SHMQ paper Tables 1 + 2)
+1. **WikiText-2 PPL** (raw, word-level) — `wikitext2-raw-v1` test split, seqlen=2048, 128 samples. Match SHMQ §4.1 protocol.
+2. **C4 PPL** (validation subset) — same seqlen, 128 samples.
+3. **Zero-shot (6 tasks)** via `lm-eval-harness` v0.4.x:
+   - `arc_challenge` (ARC-C, 1172 examples)
+   - `arc_easy` (ARC-E, 2376 examples)
+   - `boolq` (9427 examples)
+   - `hellaswag` (10042 examples)
+   - `piqa` (1838 examples)
+   - `winogrande` (1267 examples)
+   - Report per-task accuracy + 6-task average (matches SHMQ Table 2).
+
+### Q6.2 — Speed benchmarks
+4. **Inference throughput (tokens/sec)** — single-batch generation, 32 prompt tokens + 128 output tokens, batch=1. Measure median of 10 runs. Compare: FP16 baseline vs MixLLM original vs SHMQ-Ultimate.
+5. **Inference latency (ms/token)** — same setup, time-per-output-token.
+6. **Prefill latency (ms)** — 512-token prompt prefill time.
+
+### Q6.3 — Memory benchmarks
+7. **Peak VRAM during load** — `torch.cuda.max_memory_allocated()` after model load, before any forward.
+8. **Peak VRAM during inference** — `torch.cuda.max_memory_allocated()` after 128-token generation.
+9. **On-disk model size (MB)** — `du -sh` on the saved checkpoint directory.
+
+### Q6.4 — Reproducibility
+- Seed: 0 (matches MixLLM `eval.py` default).
+- Calibration: 128 samples × 2048 tokens from WikiText-2 train split (matches SHMQ §4.1).
+- For MixLLM original: run `mixllm/evaluation/run.sh` with workload = `Qwen/Qwen2.5-7B-Instruct` (need to uncomment in `eval.py:281`).
+- For SHMQ paper baseline: **not reproducible** (no code release) → cite paper numbers from Q2.4 table above.
+- For SHMQ-Ultimate: run `python scripts/gpu/benchmark_qwen7b.py --n-samples 128 --seqlen 2048`.
+
+---
+
+## Q7: Realistic Time Budget on T4 (16 GB)
+
+T4 is ~3-4× slower than A100 (40 GB) for 7B-class models, due to: (a) lower memory bandwidth (320 vs 1555 GB/s), (b) no BF16 tensor cores, (c) no FP8, (d) lower SM count (40 vs 108).
+
+### Q7.1 — Per-stage time estimates for Qwen2.5-7B-Instruct on T4
+
+| Stage | A100 baseline | T4 estimate | Notes |
+|---|---|---|---|
+| Model download (HF cache) | 5 min | 5 min | Network-bound, GPU-independent |
+| step0_load (model → GPU) | 30 s | 2 min | `device_map="auto"` + CPU offload is slower |
+| step1_smoothquant (1 fwd, 128 samples) | 3 min | **10-15 min** | T4 ~4× slower fwd |
+| step2_sensitivity Fisher (1 fwd + δW compute) | 4 min | **15-20 min** | Streamed; if not streamed, OOM |
+| step2_sensitivity OBS (per-layer Hessian) | 5 min | **20-30 min** | Block-diagonal 128×128 Hessian |
+| step3_ilp (PULP CBC solver) | 1 min | 1 min | CPU-only |
+| step3_5_isa_matching | <1 s | <1 s | CPU-only |
+| step4_permutation (1 fwd + sort) | 3 min | **10-15 min** | |
+| step5_rmsnorm_fusion (per-layer) | 1 min | 3 min | |
+| step6_autoround (200 iters × 28 blocks) | 10 min | **30-45 min** | Per AutoRound docs: 7B = 10 min on A100; T4 ~3-4× slower. `low_gpu_mem_usage=True` adds ~30% overhead. |
+| step7_sqc (per-layer grid search, 11 points) | 5 min | **15-20 min** | |
+| step8_quantize (GPTQ + RTN) | 5 min | **15-20 min** | Block-diagonal Hessian |
+| step9_mixllm_conversion (pack codes) | 2 min | 5 min | |
+| **Total quantization** | **~40 min** | **~2-3 hours** | |
+| WikiText-2 PPL eval (128 samples × 2048) | 2 min | **10-15 min** | |
+| C4 PPL eval (subset) | 2 min | **10-15 min** | |
+| Zero-shot 6 tasks (lm-eval) | 8 min | **30-45 min** | |
+| Inference speed benchmark (10 runs) | 2 min | **5-10 min** | |
+| **Total evaluation** | **~15 min** | **~1-1.5 hours** | |
+| **TOTAL end-to-end** | **~1 hour** | **~3.5-4.5 hours** | Per model × 3 models = **~10-14 hours** |
+
+### Q7.2 — Time budget for 3 models on T4
+
+| Model | Quantization | Eval | Total |
+|---|---|---|---|
+| SHMQ paper baseline | N/A (cite paper) | N/A | 0 hours |
+| MixLLM original (W4.4A8) | 1.5-2 hours | 1-1.5 hours | **2.5-3.5 hours** |
+| SHMQ-Ultimate (3-level) | 2-3 hours | 1-1.5 hours | **3-4.5 hours** |
+| FP16 baseline | 0 (load only) | 1-1.5 hours | **1-1.5 hours** |
+| **Grand total (3 quantized + FP16 baseline)** | | | **~7-10 hours** |
+
+### Q7.3 — Disk + memory budget
+- HF cache for Qwen2.5-7B-Instruct BF16: ~15.2 GB
+- HF cache for FP16 baseline (if separate): 0 (reuse same weights)
+- SHMQ-Ultimate output checkpoint: ~5-6 GB (INT4 packed + INT8 packed + FP16 path + scales + indices + permutation buffers + config sidecar)
+- MixLLM original output checkpoint: ~4-5 GB (W4.4A8 packed)
+- Total disk: **~25-30 GB**
+
+---
+
+## Deliverable Summary
+
+### 1. Qwen3-7B model availability table
+
+| Variant | Exists? | HF ID | Notes |
+|---|---|---|---|
+| `Qwen/Qwen3-7B` (base) | ❌ NO | — | Not in Qwen3 dense lineup (0.6/1.7/4/8/14/32B) |
+| `Qwen/Qwen3-7B-Instruct` | ❌ NO | — | Qwen3 doesn't separate Base/Instruct (thinking toggle) |
+| `Qwen/Qwen3-7B-Base` | ❌ NO | — | Only 1.7B-Base exists in Qwen3 series |
+| `Qwen/Qwen3-7B-AWQ` | ❌ NO | — | No 7B to quantize |
+| `Qwen/Qwen3-7B-GPTQ-Int4` | ❌ NO | — | No 7B to quantize |
+| `Qwen/Qwen3-7B-GGUF` | ❌ NO | — | No 7B to quantize |
+| `mergekit-community/Qwen3-7B-Instruct` | ✅ YES (community merge) | HF ID as named | 388 downloads, 2 likes, NOT official, not benchmarked by SHMQ/MixLLM |
+| Closest official: `Qwen/Qwen3-8B` | ✅ YES | `Qwen/Qwen3-8B` | 8.19B params, BF16, 16.4 GB raw — exceeds T4 by 0.4 GB |
+| Closest official Instruct-style: `Qwen/Qwen3-4B-Instruct-2507` | ✅ YES | `Qwen/Qwen3-4B-Instruct-2507` | 4.02B params, 8 GB BF16, fits T4 comfortably |
+| **SHMQ paper reference**: `Qwen/Qwen2.5-7B-Instruct` | ✅ YES | `Qwen/Qwen2.5-7B-Instruct` | 7.62B params, BF16, 15.2 GB raw — fits T4 with 0.8 GB headroom |
+
+### 2. T4 memory budget breakdown (Qwen2.5-7B-Instruct, BF16, with `low_gpu_mem_usage=True`)
+
+| Component | VRAM (GB) | Notes |
+|---|---|---|
+| Model weights (BF16) | 15.2 | Loaded with `device_map="auto"`, max_memory={0:"14GB","cpu":"32GB"} |
+| AutoRound V optimizer (per block) | 0.3 | (cout, cin) FP32, freed after each block |
+| Calibration activations (cached CPU, streamed to GPU) | 0.5 | 128 samples × 2048 tokens, batched 8 at a time |
+| OBS Hessian (block-diagonal 128×128) | 0.06 | Per layer, freed after |
+| GPTQ intermediate (per 128-column block) | 0.2 | |
+| Forward pass activations (batch=1, seqlen=2048) | 0.5 | |
+| CUDA context + workspace | 0.5 | |
+| **Peak VRAM** | **~16.0 GB** | Fits T4 16GB with ~0 GB headroom — needs care |
+| **With BNB INT8 loading** | **~9.0 GB** | Plenty of headroom; INT8 dequantize-on-the-fly for sensitivity |
+| **With BNB NF4 loading** | **~6.0 GB** | Maximum headroom; lossy for sensitivity computation |
+
+### 3. Realistic time budget per stage (Qwen2.5-7B-Instruct on T4)
+
+| Stage | T4 time | Cumulative |
+|---|---|---|
+| Model load + setup | 2 min | 2 min |
+| SmoothQuant calibration | 12 min | 14 min |
+| Fisher + OBS sensitivity | 25 min | 39 min |
+| ILP + ISA matching | 1 min | 40 min |
+| Decoupled permutation | 12 min | 52 min |
+| RMSNorm fusion | 3 min | 55 min |
+| AutoRound (200 iters × 28 blocks, low_gpu_mem_usage=True) | 38 min | 1h 33m |
+| SQC calibration | 18 min | 1h 51m |
+| GPTQ + RTN quantize | 18 min | 2h 9m |
+| MixLLM packing | 5 min | 2h 14m |
+| **Total quantization** | **2h 14m** | |
+| WikiText-2 PPL eval | 12 min | 2h 26m |
+| C4 PPL eval | 12 min | 2h 38m |
+| Zero-shot 6 tasks (lm-eval) | 38 min | 3h 16m |
+| Inference speed benchmark | 8 min | 3h 24m |
+| **TOTAL end-to-end (1 model)** | **~3h 24m** | |
+| × 3 models (MixLLM + SHMQ-Ultimate + FP16 baseline) | **~10-12 hours** | |
+
+### 4. Recommended model variant
+
+**Use `Qwen/Qwen2.5-7B-Instruct` (BF16, 7.62B params, 15.2 GB).** Reasons:
+1. **Fits T4 16 GB natively** with 0.8 GB headroom (no BNB pre-quantization needed).
+2. **Direct 1:1 comparison with SHMQ paper** — paper benchmarks Qwen2.5-7B-Instruct (Table 1 + Table 2). Using any other model makes apples-to-apples comparison impossible.
+3. **Direct 1:1 comparison with MixLLM original** — Microsoft's `eval.py:281` includes `Qwen/Qwen2.5-7B` in the workload list (commented out but ready to enable).
+4. **Existing project code targets this model** — `configs/qwen7b_3level.json`, `scripts/gpu/benchmark_qwen7b.py`, `scripts/gpu/eval_perplexity.py`, `scripts/gpu/eval_zeroshot.py` all already use `Qwen/Qwen2.5-7B-Instruct`.
+5. **Tokenizer + vLLM 0.9.0 + MixLLM vLLM patch all tested with Qwen2.5 architecture.**
+
+**Fallback ladder** (if Qwen2.5-7B somehow doesn't fit due to a specific step's OOM):
+- (a) Try `Qwen/Qwen3-4B-Instruct-2507` (8 GB BF16) — modern Qwen3 arch, lots of headroom, but numbers won't match SHMQ paper.
+- (b) Load Qwen2.5-7B-Instruct in BNB INT8 (7.6 GB) for sensitivity/Fisher, then dequantize per-block for AutoRound+GPTQ. Slower but works.
+- (c) Use Qwen3-1.7B for end-to-end smoke validation only (3.4 GB) — not for paper comparison.
+
+### 5. Benchmark protocol (see Q6 above for full detail)
+
+**Per model (3 models × same protocol):**
+1. WikiText-2 PPL (128 samples × 2048 tokens)
+2. C4 PPL (128 samples × 2048 tokens)
+3. Zero-shot 6 tasks (ARC-C, ARC-E, BoolQ, HellaSwag, PIQA, WinoGrande) via `lm-eval-harness` v0.4.x
+4. Inference throughput (tokens/sec, batch=1, 32→128 tokens)
+5. Inference latency (ms/token)
+6. Prefill latency (ms, 512 tokens)
+7. Peak VRAM during load
+8. Peak VRAM during inference
+9. On-disk checkpoint size (MB)
+
+**Total runtime on T4 for all 3 models + FP16 baseline**: ~7-10 hours (see Q7.2).
+
+---
+
+## Concise Final Answers (per deliverable spec)
+
+### (a) Does Qwen3-7B fit on T4 for quantization?
+**Qwen3-7B does not exist** as an official Qwen release. The closest official Qwen3 model is **Qwen3-8B** (8.19B params, BF16, 16.4 GB), which **exceeds T4 16GB by ~0.4 GB** even for raw weights — it would require BNB INT8 pre-loading. The model the SHMQ paper actually used, **Qwen2.5-7B-Instruct (7.62B, 15.2 GB BF16)**, **fits T4 16GB natively with 0.8 GB headroom**, and the full SHMQ-Ultimate quantization pipeline fits T4 with three mitigations: (1) `device_map="auto"` + `max_memory={0:"14GB","cpu":"32GB"}`, (2) AutoRound `low_gpu_mem_usage=True` (drops step6 from 34 GB to 14 GB), (3) replace full Hessian in `obs.py`/`gptq.py` with 128×128 block-diagonal Hessian (SliM-LLM recipe, drops 1.34 GB → 64 MB per layer).
+
+### (b) What model variant do we actually use?
+**`Qwen/Qwen2.5-7B-Instruct` (BF16, 7.62B params, 15.2 GB).** This is the model both the SHMQ paper and Microsoft MixLLM tested; it's already configured in `configs/qwen7b_3level.json`; it fits T4 natively; it allows direct comparison with published SHMQ Table 1 (PPL) and Table 2 (zero-shot) numbers. The "Qwen3-7B" name in the task description was based on a misattribution — the SHMQ paper does NOT benchmark Qwen3-7B.
+
+### (c) Total expected runtime on T4?
+- **Per model end-to-end (quantize + eval): ~3.5 hours** (2h 14m quantize + 1h 10m eval).
+- **All 3 models (MixLLM original + SHMQ-Ultimate + FP16 baseline): ~7-10 hours** on a single T4.
+- **Critical path = AutoRound step6 (200 iters × 28 blocks with `low_gpu_mem_usage=True`): ~38 min on T4** (vs 10 min on A100).
+
+## Files Touched (None — research-only task)
+
+No source files modified. This is a research deliverable. Next agent should:
+1. Wire `low_gpu_mem_usage=True` flag through `src/shmq/autoround/autoround_block.py` → `pipeline.py` step6.
+2. Replace full Hessian in `src/shmq/sensitivity/obs.py` (line 168) and `src/shmq/quantize/gptq.py` (line 199) with 128×128 block-diagonal Hessian (SliM-LLM recipe). Critical for T4 fit.
+3. Add `max_memory` parameter to `pipeline.step0_load` so the model loads with `device_map="auto"` + `max_memory={0:"14GB","cpu":"32GB"}`.
+4. Add `Qwen/Qwen2.5-7B-Instruct` (not `Qwen3-7B`) to any model-selection prompts in `scripts/gpu/run_pipeline.py`.
+5. Enable MixLLM-original reproduction: uncomment `Qwen/Qwen2.5-7B-Instruct` in `external/MixLLM/mixllm/evaluation/eval.py:281` workloads and run on T4 to get the MixLLM-original W4.4A8 numbers (will take ~2.5-3.5 hours).

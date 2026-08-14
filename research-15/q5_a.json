@@ -1,0 +1,74 @@
+[
+  {
+    "url": "https://docs.vllm.ai/en/stable/getting_started/installation/gpu",
+    "name": "GPU",
+    "snippet": "vLLM is a Python library that supports the following GPU variants. support Windows natively. GPU : compute capability 7.5 or higher (e.g., T4 , RTX20xx, MUST.",
+    "host_name": "docs.vllm.ai",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/issues/27729",
+    "name": "The NVIDIA T4 throws an error when running vLLM 0.11.0 ·",
+    "snippet": "Oct 29, 2025 — FlashInfer only supports NVIDIA GPUs with SM 75 or above (e.g., T4 and newer). #28379 addresses issues on GPUs with compute capability lower ... Read more",
+    "host_name": "github.com",
+    "rank": 1,
+    "date": "Oct 29, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.speediyo.com/ai-infra/vllm-v100-t4-sm70-sm75-fallback",
+    "name": "vLLM Legacy GPU Setup: Tuning V100 sm_70 & T4 sm_75",
+    "snippet": "The definitive build reference for deploying vLLM on legacy NVIDIA Volta (V100) and Turing ( T4 ) GPUs . This guide details how to build stable legacy compilation ...",
+    "host_name": "www.speediyo.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1qim0e9/vllm_v0140_released",
+    "name": "r/LocalLLaMA - vLLM v0.14.0 released",
+    "snippet": "VLLM for actually improving compatibility for older GPUs , Automatically fits context length to available GPU memory, eliminating OOM startup ...",
+    "host_name": "www.reddit.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.nvidia.com/deeplearning/frameworks/vllm-release-notes/rel-25-09.html",
+    "name": "vLLM Release 25.09 - NVIDIA Docs",
+    "snippet": "vLLM Container is optimized for use with NVIDIA GPUs , Compatibility with CUDA 13.0. Support for multi-node configurations. Support for 8-bit floating point (FP ...",
+    "host_name": "docs.nvidia.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://discourse.aicrowd.com/t/issues-using-llm-and-lora-adapter-on-nvidia-t4/10480",
+    "name": "Issues Using LLM and LoRA Adapter on NVIDIA T4",
+    "snippet": "Jun 3, 2024 — I am trying to tune a model using LoRA with Peft, but I'm encountering issues with using vllm and LoRA together. Environment: vllm ==0.4.2 ...",
+    "host_name": "discourse.aicrowd.com",
+    "rank": 5,
+    "date": "Jun 3, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.gmicloud.ai/ja/blog/vllm-gpu-compatibility-quantization",
+    "name": "vLLM GPU Support: Which GPUs Run Your Kernels",
+    "snippet": "Apr 13, 2026 — vLLM runs on most NVIDIA GPUs , This article maps how vLLM support varies across the GPUs most teams evaluate, They quantize to fit larger ...",
+    "host_name": "www.gmicloud.ai",
+    "rank": 6,
+    "date": "Apr 13, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/issues/1063",
+    "name": "AWQ does not support Turing GPUs · Issue #1063",
+    "snippet": "Sep 16, 2023 — @WoosukKwon Doesn't it support Turing arch? my GPU's compute capabitlity is 7.5. CUDA-12.1. ... If not, hope can add backward compatibility for ... Read more",
+    "host_name": "github.com",
+    "rank": 7,
+    "date": "Sep 16, 2023",
+    "favicon": ""
+  }
+]

@@ -1,0 +1,56 @@
+[
+  {
+    "url": "https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/412",
+    "name": "Error loading model (code 18446744073709515000) #412",
+    "snippet": "Feb 6, 2025 — Try a different model and/or config. fp16 : 1 | warp size : 64 | matrix cores: tokenizer .ggml.model _tokenizer: initializing tokenizer for type",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "Feb 6, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://zhuanlan.zhihu.com/p/16964017115",
+    "name": "llama.cpp量化和部署qwen2.5 7b\\QWQ\\QVQ三个模型",
+    "snippet": "Jan 7, 2025 — 本文先实现Qwen2_5- 7B -Instruct的量化,然后使用llama.cpp实现推理和服务. 后面类似实现qwq和qvq的量化推理. 本文的代码运行的机器是96GB内存,和3090 ... Read more",
+    "host_name": "zhuanlan.zhihu.com",
+    "rank": 1,
+    "date": "Jan 7, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/QwenLM/Qwen3/issues/997",
+    "name": "[Bug]: 文档问答会忽略部分数据，比如证书号是12345 回答的",
+    "snippet": "Sep 29, 2024 — Model Series Qwen2.5. Qwen2.5- 7B -Instruct- fp16 -gguf. I have checked the Qwen documentation and cannot find an answer there. tokenizer .ggml. ...",
+    "host_name": "github.com",
+    "rank": 2,
+    "date": "Sep 29, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://blog.csdn.net/weixin_31569663/article/details/157008630",
+    "name": "Qwen2.5部署资源评估：CPU内存与GPU显存协同配置",
+    "snippet": "Jan 16, 2026 — 对于一个 7.62B 参数的Transformer 模型，若以 FP16 （半精度浮点数）格式加载，理论最小显存需求为： 7.62 × 10^9 parameters × 2 bytes = ~15.24 GB. Read more",
+    "host_name": "blog.csdn.net",
+    "rank": 3,
+    "date": "Jan 16, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/pyannote/pyannote-audio/issues/1800",
+    "name": "Repo id must be in the form 'repo_name' or '",
+    "snippet": "Nov 28, 2024 — Special tokens have been added in the vocabulary , make sure the associated word embeddings are fine-tuned or trained. Qwen/Qwen2- 7B -Instruct",
+    "host_name": "github.com",
+    "rank": 4,
+    "date": "Nov 28, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/ollama/ollama/issues/13460",
+    "name": "Metal library compilation error after macOS 26.2 / Xcode",
+    "snippet": "Dec 13, 2025 — After updating to macOS 26.2 and the latest Xcode Command Line Tools, Ollama fails to load any model with a Metal library compilation error. The ... Read more",
+    "host_name": "github.com",
+    "rank": 5,
+    "date": "Dec 13, 2025",
+    "favicon": ""
+  }
+]

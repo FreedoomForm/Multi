@@ -1,0 +1,1000 @@
+     1→# Copyright (c) Microsoft Corporation.
+     2→# SPDX-License-Identifier: MIT
+     3→
+     4→import torch
+     5→import torch.nn as nn
+     6→# from collections import OrderedDict
+     7→import copy
+     8→from tqdm import tqdm
+     9→import gc
+    10→from typing import Dict, Union, Tuple, Optional, List
+    11→from itertools import chain
+    12→from functools import partial
+    13→import math
+    14→import logging
+    15→from mixllm.nn.modules.linear_for_vllm import LinearMixLLM4vLLM
+    16→
+    17→from ..utils import modeling, debug
+    18→from ..utils.debug import TimeUtils
+    19→
+    20→torch.backends.cuda.matmul.allow_tf32 = False
+    21→torch.backends.cudnn.allow_tf32 = False
+    22→
+    23→# import torch._dynamo
+    24→# torch._dynamo.config.suppress_errors = True
+    25→
+    26→logger = logging.getLogger('mixllm')
+    27→
+    28→
+    29→class QuantConfig:
+    30→    """
+    31→    Quantization configuration for Linear layers.
+    32→    """
+    33→
+    34→    def __init__(self, bit_config_map: Dict[int, Dict[str, Union[int, bool,
+    35→                                                                 List[int]]]]):
+    36→        """
+    37→        {
+    38→            bit_width: {
+    39→                'group_size': int, 
+    40→                'asymmetric': bool, 
+    41→                'gptq': bool,         # optional
+    42→                'clip_shrink': bool,  # optional
+    43→                'indices': List[int]  # optional for single bit-width.
+    44→            }
+    45→        }
+    46→        """
+    47→        self.bit_config_map = bit_config_map
+    48→
+    49→    def verify(self, weight_shape: Tuple[int, int]):
+    50→        for bit_width, config in self.bit_config_map.items():
+    51→            assert bit_width > 0
+    52→            assert 'group_size' in config
+    53→            assert 'asymmetric' in config
+    54→        if len(self.bit_config_map) > 1:
+    55→            # If there are multiple bit-widths, at least one of them should have
+    56→            # indices.
+    57→            at_least_one_indices = False
+    58→            for _, config in self.bit_config_map.items():
+    59→                if 'indices' in config:
+    60→                    at_least_one_indices = True
+    61→                    break
+    62→            assert at_least_one_indices
+    63→
+    64→            # Check if all indices are covered.
+    65→            all_indices = set()
+    66→            for _, config in self.bit_config_map.items():
+    67→                if 'indices' in config:
+    68→                    all_indices.update(config['indices'])
+    69→            assert all_indices == set(range(weight_shape[0]))
+    70→
+    71→    def get_uniform_bit(self, weight_shape: Tuple[int, int]):
+    72→        # TODO: rewrite the related logic.
+    73→        if len(self.bit_config_map) == 1:
+    74→            return next(iter(self.bit_config_map.keys()))
+    75→        for bit_width, config in self.bit_config_map.items():
+    76→            if 'indices' not in config:
+    77→                continue
+    78→            if len(config['indices']) == weight_shape[0]:
+    79→                return bit_width
+    80→        return -1
+    81→
+    82→
+    83→# TODO: use a more general definition for the mixLLM configuration.
+    84→class MixLLMConfig:
+    85→
+    86→    def __init__(self, bit_percent: Dict[int, int],
+    87→                 weight_config: Dict[int, Dict[str, Union[int, bool]]],
+    88→                 activation_config: Dict[str, Union[int, bool]]) -> None:
+    89→        # The general configuration.
+    90→        self.bit_percent = {
+    91→            bit: pct for bit, pct in bit_percent.items() if pct > 0
+    92→        }
+    93→        self.weight_config = {
+    94→            bit: conf
+    95→            for bit, conf in weight_config.items()
+    96→            if bit in self.bit_percent
+    97→        }
+    98→        self.activation_config = activation_config
+    99→
+   100→        # The configuration of each linear layer.
+   101→        self.linear_config_map: Dict[str, QuantConfig] = dict()
+   102→
+   103→        self.__verify()
+   104→
+   105→    def __verify(self):
+   106→        # weight config
+   107→        assert self.bit_percent and (sum(self.bit_percent.values()) == 100)
+   108→        assert self.weight_config and (len(self.weight_config) > 0)
+   109→        for bit_width, percent in self.bit_percent.items():
+   110→            assert bit_width > 0
+   111→            assert percent > 0
+   112→            assert bit_width in self.weight_config
+   113→            assert 'group_size' in self.weight_config[bit_width]
+   114→            assert 'asymmetric' in self.weight_config[bit_width]
+   115→
+   116→        # activation config
+   117→        if self.activation_config:
+   118→            act_bit_width = self.activation_config.get('bit_width', -1)
+   119→            # assert (act_bit_width == 8) or (act_bit_width == 16)
+   120→            act_group_size = self.activation_config.get('group_size', -1)
+   121→            # assert act_group_size > 0
+   122→            act_asymmetric = self.activation_config.get('asymmetric', False)
+   123→            assert act_asymmetric == False
+   124→
+   125→    def save(self, path: str):
+   126→        torch.save(self.linear_config_map, path)
+   127→
+   128→    def load(self, path: str):
+   129→        self.linear_config_map = torch.load(path)
+   130→
+   131→    def __str__(self):
+   132→        return f"{self.linear_config_map}"
+   133→
+   134→    def __repr__(self):
+   135→        return self.__str__()
+   136→
+   137→
+   138→class _EarlyExitException(Exception):
+   139→    pass
+   140→
+   141→
+   142→@torch.no_grad()
+   143→def _exit_fwd_pre_hook(module, input):
+   144→    raise _EarlyExitException
+   145→
+   146→
+   147→class QuantizedLinearLayer(nn.Linear):
+   148→
+   149→    def __init__(self, activation_config=None, **kwargs):
+   150→        super(QuantizedLinearLayer, self).__init__(**kwargs)
+   151→        # TODO: add weight quantization here.
+   152→        self.activation_config = activation_config
+   153→        if self.activation_config:
+   154→            bit_width = self.activation_config['bit_width']
+   155→            group_size = self.activation_config.get('group_size', 128)
+   156→            asymmetric = self.activation_config.get('asymmetric', False)
+   157→            self.quant_fn = partial(Quantizer.quantize_activation,
+   158→                                    bit_width=bit_width,
+   159→                                    group_size=group_size,
+   160→                                    asymmetric=asymmetric,
+   161→                                    fake=True)
+   162→            self.activation_quant_bits = 8
+   163→
+   164→    def forward(self, input):
+   165→        if self.activation_config:
+   166→            input = self.quant_fn(input)
+   167→        if self.bias is not None:
+   168→            return nn.functional.linear(input, self.weight, self.bias)
+   169→        else:
+   170→            return nn.functional.linear(input, self.weight)
+   171→
+   172→
+   173→class Quantizer(torch.autograd.Function):
+   174→    __DEBUG = True
+   175→
+   176→    @classmethod
+   177→    def __get_quantize_param_raw(cls, input: torch.Tensor, bit_width: int,
+   178→                                 group_size: int, asymmetric: bool):
+   179→        '''
+   180→        Quantize along the row direction, which is the out_channels direction
+   181→        for the weight tensor and the token direction for the activation tensor
+   182→        by default.
+   183→        '''
+   184→
+   185→        shape = input.shape
+   186→        device = input.device
+   187→        if input.dim() == 3:  # activation
+   188→            input = input.reshape(-1, shape[-1])
+   189→        n_rows, hidden_size = input.shape
+   190→        if group_size > 0:
+   191→            assert hidden_size % group_size == 0
+   192→        else:
+   193→            group_size = hidden_size
+   194→        input = input.reshape(-1, group_size)
+   195→
+   196→        if asymmetric:
+   197→            min_val, max_val = input.aminmax(dim=1, keepdim=True)
+   198→            min_val = min_val.reshape(n_rows, -1)  # not neessary?
+   199→            max_val = max_val.reshape(n_rows, -1)
+   200→            min_int = 0
+   201→            max_int = 2**bit_width - 1
+   202→        else:
+   203→            min_val = 0
+   204→            max_val = input.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
+   205→            max_val = max_val.reshape(n_rows, -1)
+   206→            min_int = -(2**(bit_width - 1))
+   207→            max_int = 2**(bit_width - 1) - 1
+   208→
+   209→        return min_val, max_val, min_int, max_int
+   210→
+   211→    @classmethod
+   212→    @torch.no_grad()
+   213→    def __shrinked_scales_zeros(cls, min_val, max_val, min_int, max_int, ratio,
+   214→                                asymmetric):
+   215→        min_val, max_val = min_val * ratio, max_val * ratio
+   216→        if asymmetric:
+   217→            # TODO: test removing the clamp.
+   218→            scales = (max_val - min_val).clamp(min=1e-5) / max_int
+   219→            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+   220→        else:
+   221→            scales = max_val / max_int
+   222→            zeros = 0
+   223→        return scales, zeros
+   224→
+   225→    @classmethod
+   226→    @torch.no_grad()
+   227→    def __quantize_with_param(cls,
+   228→                              input: torch.Tensor,
+   229→                              bit_width: int,
+   230→                              group_size: int,
+   231→                              asymmetric: bool,
+   232→                              scales: torch.Tensor,
+   233→                              zeros: Union[torch.Tensor, int],
+   234→                              min_int: int,
+   235→                              max_int: int,
+   236→                              fake: bool = True):
+   237→        shape = input.shape
+   238→        input = input.reshape(-1, shape[-1])
+   239→        out_features, in_features = input.shape
+   240→        if group_size > 0:
+   241→            assert in_features % group_size == 0
+   242→        else:
+   243→            group_size = in_features
+   244→        num_groups_per_channel = in_features // group_size
+   245→        group_number = out_features * num_groups_per_channel
+   246→        input = input.reshape(group_number, group_size)
+   247→        scales = scales.reshape(group_number, 1)
+   248→        zeros = zeros.reshape(group_number, 1) if isinstance(
+   249→            zeros, torch.Tensor) else zeros
+   250→        quantized = torch.clamp(
+   251→            torch.round(input / scales) + zeros, min_int, max_int)
+   252→        if cls.__DEBUG:
+   253→            assert torch.isnan(quantized).sum() == 0
+   254→            assert torch.isinf(quantized).sum() == 0
+   255→
+   256→        if fake:
+   257→            dequantized = (quantized - zeros) * scales
+   258→            return dequantized.reshape(shape)
+   259→        else:
+   260→            if bit_width == 8:
+   261→                dtype = torch.uint8 if asymmetric else torch.int8
+   262→            elif bit_width == 4:
+   263→                # To support the 4-bit, maybe by packing.
+   264→                dtype = torch.uint4 if asymmetric else torch.int4
+   265→            else:
+   266→                raise ValueError("Unsupported bit-width.")
+   267→            quantized = quantized.to(dtype).reshape(shape)
+   268→            shape[-1] = num_groups_per_channel
+   269→            scales = scales.reshape(shape)
+   270→            zeros = zeros.to(dtype).reshape(shape) if asymmetric else zeros
+   271→            return quantized, scales, zeros
+   272→
+   273→    @classmethod
+   274→    @torch.compile
+   275→    @torch.no_grad()
+   276→    def __mse_with_delta_weight(cls, input, delta_weight, dim=None):
+   277→        mse = ((torch.einsum('ti,oi->to', input,
+   278→                             delta_weight)**2).mean(dim=dim))
+   279→        return mse
+   280→
+   281→    @classmethod
+   282→    @torch.no_grad()
+   283→    def __search_clip_param_groupwise(cls, weight, activation, bit_width,
+   284→                                      group_size, asymmetric):
+   285→        out_features, in_features = weight.shape
+   286→        dtype = weight.dtype
+   287→        device = weight.device
+   288→        if group_size > 0:
+   289→            assert in_features % group_size == 0
+   290→        else:
+   291→            group_size = in_features
+   292→
+   293→        min_val, max_val, min_int, max_int = cls.__get_quantize_param_raw(
+   294→            weight, bit_width, group_size, asymmetric)
+   295→        num_groups_per_channel = in_features // group_size
+   296→        group_number = out_features * num_groups_per_channel
+   297→        min_val = min_val.reshape(group_number, 1) if isinstance(
+   298→            min_val, torch.Tensor) else min_val
+   299→        max_val = max_val.reshape(group_number, 1)
+   300→
+   301→        group_min_mse = torch.full((num_groups_per_channel, out_features),
+   302→                                   float('inf'),
+   303→                                   dtype=dtype,
+   304→                                   device=device)
+   305→        group_best_pct = torch.full((num_groups_per_channel, out_features),
+   306→                                    100,
+   307→                                    dtype=torch.int,
+   308→                                    device=device)
+   309→        # input = activation.reshape(-1, activation.shape[-1])
+   310→        # [s, n_g, g] -> [n_g, s, g]
+   311→        input_grouped = activation.reshape(-1, num_groups_per_channel,
+   312→                                           group_size).permute(1, 0,
+   313→                                                               2).contiguous()
+   314→        # [o, n_g, g] -> [n_g, o, g]
+   315→        weight_grouped = weight.reshape(out_features, num_groups_per_channel,
+   316→                                        group_size).permute(1, 0,
+   317→                                                            2).contiguous()
+   318→
+   319→        # use_compile = True
+   320→        step = 2
+   321→        pct_grid = range(80, 101, step)
+   322→        for pct in pct_grid:
+   323→            ratio = pct / 100.0
+   324→            scales, zeros = cls.__shrinked_scales_zeros(min_val, max_val,
+   325→                                                        min_int, max_int, ratio,
+   326→                                                        asymmetric)
+   327→            quantized = cls.__quantize_with_param(weight,
+   328→                                                  bit_width,
+   329→                                                  group_size,
+   330→                                                  asymmetric,
+   331→                                                  scales,
+   332→                                                  zeros,
+   333→                                                  min_int,
+   334→                                                  max_int,
+   335→                                                  fake=True)
+   336→            if cls.__DEBUG:
+   337→                assert quantized.isnan().sum() == 0
+   338→                assert quantized.isinf().sum() == 0
+   339→
+   340→            quantized = weight_grouped - quantized.reshape(
+   341→                out_features, num_groups_per_channel, group_size).permute(
+   342→                    1, 0, 2).contiguous()
+   343→            # # [out_features, num_groups_per_channel]
+   344→            # mse = (torch.einsum('tng,ong->ton', input_grouped,
+   345→            #                     quantized)**2).mean(dim=0)
+   346→            for gid, (input_g,
+   347→                      delta_g) in enumerate(zip(input_grouped, quantized)):
+   348→                if False:
+   349→                    debug.dump_mem("search_clip_param_groupwise before mse")
+   350→                    print(f"input_g GB: {debug.tensor_size_gigabytes(input_g)}")
+   351→                    print(f"delta_g GB: {debug.tensor_size_gigabytes(delta_g)}")
+   352→                # TODO: OOM for llama 70B model.
+   353→                # mse = ((torch.einsum('tg,og->to', input_g,
+   354→                #                      delta_g)**2).mean(dim=0))
+   355→                mse = cls.__mse_with_delta_weight(input_g, delta_g, dim=0)
+   356→                if False:
+   357→                    debug.dump_mem("search_clip_param_groupwise after mse")
+   358→                    print(f"mse GB: {debug.tensor_size_gigabytes(mse)}")
+   359→                update_mask = mse < group_min_mse[gid]
+   360→                group_min_mse[gid][update_mask] = mse[update_mask]
+   361→                group_best_pct[gid][update_mask] = pct
+   362→            del quantized
+   363→            if cls.__DEBUG:
+   364→                assert group_min_mse.isnan().sum() == 0
+   365→        del group_min_mse
+   366→        del input_grouped
+   367→        del weight_grouped
+   368→
+   369→        # quantize according to the best pct.
+   370→        ratio = (group_best_pct / 100.0).to(dtype).t().contiguous().reshape(
+   371→            group_number, -1)
+   372→        scales, zeros = cls.__shrinked_scales_zeros(min_val, max_val, min_int,
+   373→                                                    max_int, ratio, asymmetric)
+   374→        scales = scales.reshape(out_features, num_groups_per_channel)
+   375→        zeros = zeros.reshape(out_features,
+   376→                              num_groups_per_channel) if isinstance(
+   377→                                  zeros, torch.Tensor) else zeros
+   378→
+   379→        enable_fallback = True
+   380→        if enable_fallback:
+   381→            scales_base, zeros_base, _, _ = cls.__get_quant_param(
+   382→                weight, bit_width, group_size, asymmetric)
+   383→            quant_base = cls.__quantize_with_param(weight,
+   384→                                                   bit_width,
+   385→                                                   group_size,
+   386→                                                   asymmetric,
+   387→                                                   scales_base,
+   388→                                                   zeros_base,
+   389→                                                   min_int,
+   390→                                                   max_int,
+   391→                                                   fake=True)
+   392→            assert quant_base.isnan().sum() == 0
+   393→            assert quant_base.isinf().sum() == 0
+   394→            # mse_base = (torch.einsum('ti,oi->to',
+   395→            #                          activation.reshape(-1, in_features),
+   396→            #                          quant_base - weight)**2).mean()
+   397→            mse_base = cls.__mse_with_delta_weight(
+   398→                activation.reshape(-1, in_features), quant_base - weight)
+   399→            del quant_base
+   400→            quant_new = cls.__quantize_with_param(weight,
+   401→                                                  bit_width,
+   402→                                                  group_size,
+   403→                                                  asymmetric,
+   404→                                                  scales,
+   405→                                                  zeros,
+   406→                                                  min_int,
+   407→                                                  max_int,
+   408→                                                  fake=True)
+   409→            assert quant_new.isnan().sum() == 0
+   410→            assert quant_new.isinf().sum() == 0
+   411→            # mse_new = (torch.einsum('ti,oi->to',
+   412→            #                         activation.reshape(-1, in_features),
+   413→            #                         quant_new - weight)**2).mean()
+   414→            mse_new = cls.__mse_with_delta_weight(
+   415→                activation.reshape(-1, in_features), quant_new - weight)
+   416→            del quant_new
+   417→            # assert mse_new <= mse_base, f"{mse_new} not less than {mse_base}"
+   418→
+   419→            if mse_new > mse_base:
+   420→                # Note the per-group smaller mse does not guarantee the global
+   421→                # smaller mse, as the per-group mse is calculated based on the
+   422→                # partial value on K dimension.
+   423→                scales = scales_base
+   424→                zeros = zeros_base
+   425→                logger.info(f"clip_shrink fallback for a tensor.")
+   426→
+   427→        return scales, zeros, min_int, max_int
+   428→
+   429→    @classmethod
+   430→    def __get_quant_param(cls, input: torch.Tensor, bit_width: int,
+   431→                          group_size: int, asymmetric: bool):
+   432→        '''
+   433→        Quantize along the row direction, which is the out_channels direction
+   434→        for the weight tensor and the token direction for the activation tensor
+   435→        by default.
+   436→        '''
+   437→        min_val, max_val, min_int, max_int = cls.__get_quantize_param_raw(
+   438→            input, bit_width, group_size, asymmetric)
+   439→
+   440→        if asymmetric:
+   441→            # TODO: test removing the clamp.
+   442→            scales = (max_val - min_val).clamp(min=1e-5) / max_int
+   443→            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+   444→        else:
+   445→            scales = max_val / max_int
+   446→            zeros = 0
+   447→
+   448→        return scales, zeros, min_int, max_int
+   449→
+   450→    @classmethod
+   451→    @torch.no_grad()
+   452→    def __quantize_weight_rtn(cls,
+   453→                              weight: torch.Tensor,
+   454→                              activation: torch.Tensor,
+   455→                              bit_width: int,
+   456→                              group_size: int,
+   457→                              asymmetric: bool,
+   458→                              enable_clip_shrink: bool = False,
+   459→                              fake: bool = True):
+   460→        '''
+   461→        Quantize along the row direction, which is the out_channels direction
+   462→        for the weight tensor and the token direction for the activation tensor
+   463→        by default.
+   464→        '''
+   465→        if enable_clip_shrink:
+   466→            assert activation is not None
+   467→            scales, zeros, min_int, max_int = cls.__search_clip_param_groupwise(
+   468→                weight, activation, bit_width, group_size, asymmetric)
+   469→        else:
+   470→            scales, zeros, min_int, max_int = cls.__get_quant_param(
+   471→                weight, bit_width, group_size, asymmetric)
+   472→
+   473→        return cls.__quantize_with_param(weight, bit_width, group_size,
+   474→                                         asymmetric, scales, zeros, min_int,
+   475→                                         max_int, fake)
+   476→
+   477→    @classmethod
+   478→    @torch.compile
+   479→    def __hessinv(cls, H: torch.Tensor, percdamp: float):
+   480→        damp = percdamp * torch.mean(torch.diag(H))
+   481→        diag = torch.arange(H.size(0), device=H.device)
+   482→        H[diag, diag] += damp
+   483→        H = torch.linalg.cholesky(H)
+   484→        H = torch.cholesky_inverse(H)
+   485→        H = torch.linalg.cholesky(H, upper=True)
+   486→        Hinv = H.to(torch.float32)
+   487→        return Hinv
+   488→
+   489→    @classmethod
+   490→    @torch.no_grad()
+   491→    def __quantize_weight_gptq(
+   492→            cls,
+   493→            weight: torch.Tensor,
+   494→            activation: torch.Tensor,
+   495→            bit_width: int,
+   496→            group_size: int,
+   497→            asymmetric: bool,
+   498→            group_reorder: bool,
+   499→            #    reorder: bool,
+   500→            #    jit_group_param: bool,
+   501→            enable_clip_shrink: bool,
+   502→            percdamp: float = 0.01,
+   503→            fake: bool = True):
+   504→        '''
+   505→        Partial of the code is based on https://github.com/IST-DASLab/gptq.
+   506→        '''
+   507→
+   508→        device = weight.device
+   509→        dtype = weight.dtype
+   510→        out_features, in_features = weight.shape
+   511→        # Transpose the weight to speedup the GPTQ execution (higher memory
+   512→        # efficiency).
+   513→        weight_update_t = weight.clone().detach().t().contiguous().to(
+   514→            torch.float32)
+   515→        if group_size > 0:
+   516→            assert in_features % group_size == 0
+   517→        else:
+   518→            group_size = in_features
+   519→        block_size = group_size
+   520→
+   521→        hess_dtype = torch.float64
+   522→        assert activation.dim() == 3, "Only support 3D activation tensor."
+   523→        assert activation.size(-1) == in_features
+   524→        batch = activation.size(0)
+   525→        H = torch.zeros(in_features,
+   526→                        in_features,
+   527→                        dtype=hess_dtype,
+   528→                        device=device)
+   529→        for sample in activation:
+   530→            # Run different samples separately to save memory.
+   531→            tmp = math.sqrt(2 / batch) * sample.to(hess_dtype)
+   532→            H += torch.einsum('si,sj->ij', tmp, tmp)
+   533→            del tmp
+   534→        dead = torch.diag(H) == 0
+   535→        H[dead, dead] = 1
+   536→        weight_update_t[dead, :] = 0
+   537→        del dead
+   538→
+   539→        num_groups_per_channel = in_features // group_size
+   540→
+   541→        # if reorder:
+   542→        #     perm = torch.argsort(torch.diag(H), descending=True)
+   543→        #     weight_update_t = weight_update_t[perm, :]
+   544→        #     H = H[perm][:, perm]
+   545→        #     perm_inv = torch.argsort(perm)
+   546→
+   547→        if group_reorder:
+   548→            grouped_diag_sum = torch.diag(H).reshape(-1, group_size).sum(1)
+   549→            group_perm = torch.argsort(grouped_diag_sum, descending=True)
+   550→            if cls.__DEBUG:
+   551→                assert (group_perm.dim() == 1) and (group_perm.numel()
+   552→                                                    == num_groups_per_channel)
+   553→            perm_base = (group_perm * group_size).expand(
+   554→                group_size, num_groups_per_channel).t().contiguous()
+   555→            offsets = torch.tensor(
+   556→                list(range(group_size)),
+   557→                device=weight.device).repeat(num_groups_per_channel).reshape(
+   558→                    num_groups_per_channel, group_size)
+   559→            perm = (perm_base + offsets).reshape(-1)
+   560→            del perm_base, offsets
+   561→
+   562→            weight_update_t = weight_update_t[perm, :]
+   563→            H = H[perm][:, perm]
+   564→
+   565→            perm_inv = torch.argsort(perm)
+   566→            group_perm_inv = torch.argsort(group_perm)
+   567→
+   568→        use_compile = True
+   569→        if use_compile:
+   570→            Hinv = cls.__hessinv(H, percdamp)
+   571→        else:
+   572→            damp = torch.tensor(percdamp, dtype=hess_dtype,
+   573→                                device=device) * torch.mean(torch.diag(H))
+   574→            diag = torch.arange(in_features, device=device)
+   575→            H[diag, diag] += damp
+   576→            del damp, diag
+   577→            H = torch.linalg.cholesky(H)
+   578→            H = torch.cholesky_inverse(H)
+   579→            H = torch.linalg.cholesky(H, upper=True)
+   580→            Hinv = H.to(weight_update_t.dtype)
+   581→        del H
+   582→
+   583→        if asymmetric:
+   584→            min_int = 0
+   585→            max_int = 2**bit_width - 1
+   586→        else:
+   587→            min_int = -(2**(bit_width - 1))
+   588→            max_int = 2**(bit_width - 1) - 1
+   589→
+   590→        def quant_slice(input: torch.Tensor, s, z):
+   591→            assert (input.dim() == 1) and (s.dim() == 1)
+   592→            quantized = torch.clamp(
+   593→                torch.round(input / s) + z, min_int, max_int)
+   594→            dequantized = (quantized - z) * s
+   595→            return dequantized, quantized
+   596→
+   597→        # Use transposed layout to speedup the memory access.
+   598→        quantized = torch.full((in_features, out_features),
+   599→                               float('nan'),
+   600→                               dtype=dtype,
+   601→                               device=device)
+   602→        # if reorder and (not jit_group_param):
+   603→        #     _, scales, zeros = cls.__quantize_weight_rtn(weight,
+   604→        #                                                  activation,
+   605→        #                                                  bit_width,
+   606→        #                                                  group_size,
+   607→        #                                                  asymmetric,
+   608→        #                                                  enable_clip_shrink,
+   609→        #                                                  fake=False)
+   610→        #     scales = scales.reshape(out_features,
+   611→        #                             num_groups_per_channel).t().contiguous()
+   612→        #     if asymmetric:
+   613→        #         zeros = zeros.reshape(out_features,
+   614→        #                               num_groups_per_channel).t().contiguous()
+   615→        # else:
+   616→        #     if jit_group_param:
+   617→        #         param_ready = set()
+   618→        scales = torch.full((num_groups_per_channel, out_features),
+   619→                            float('nan'),
+   620→                            dtype=dtype,
+   621→                            device=device)
+   622→        if asymmetric:
+   623→            zeros = torch.full((num_groups_per_channel, out_features),
+   624→                               float('nan'),
+   625→                               dtype=dtype,
+   626→                               device=device)
+   627→        input = activation.reshape(-1, in_features)
+   628→        for i1 in range(0, in_features, block_size):
+   629→            i2 = min(i1 + block_size, in_features)
+   630→            count = i2 - i1
+   631→
+   632→            weight_block_t = weight_update_t[i1:i2, :].clone().contiguous()
+   633→            err_block_t = torch.zeros_like(weight_block_t)
+   634→            Hinv_block = Hinv[i1:i2, i1:i2]
+   635→
+   636→            # We can do this here because block_size == group_size.
+   637→
+   638→            # if not reorder:
+   639→            if enable_clip_shrink:
+   640→                input_block = input[:, i1:i2].clone().to(
+   641→                    weight_block_t.dtype).contiguous()
+   642→                s, z, _, _ = cls.__search_clip_param_groupwise(
+   643→                    weight_block_t.t().contiguous(), input_block, bit_width,
+   644→                    group_size, asymmetric)
+   645→            else:
+   646→                s, z, _, _ = cls.__get_quant_param(
+   647→                    weight_block_t.t().contiguous(), bit_width, group_size,
+   648→                    asymmetric)
+   649→            s = s.reshape(-1)
+   650→            z = z.reshape(-1) if not isinstance(z, int) else z
+   651→
+   652→            for i in range(count):
+   653→                feature_idx = i1 + i
+   654→                # if reorder:
+   655→                #     feature_idx_real = perm[feature_idx]
+   656→                #     if jit_group_param:
+   657→                #         group_idx_real = feature_idx_real // group_size
+   658→                #         if group_idx_real not in param_ready:
+   659→                #             group_indices = list(
+   660→                #                 range(group_idx_real * group_size,
+   661→                #                       min((group_idx_real + 1) * group_size)))
+   662→                #             group_indices = perm_inv[torch.tensor(group_indices,
+   663→                #                                          device=weight.device)]
+   664→                #             weight_group_tensor = ...
+   665→                #             input_group_tensor = ...
+   666→                #     else:
+   667→                #         s = scales[feature_idx_real, :]
+   668→                #         if asymmetric:
+   669→                #             z = zeros[feature_idx_real, :]
+   670→                #         else:
+   671→                #             z = zeros
+   672→
+   673→                w = weight_block_t[i, :]
+   674→                d = Hinv_block[i, i]
+   675→                w_q, q = quant_slice(w, s, z)
+   676→                # TODO: to wrap more functions into the compile scope.
+   677→                err_feature = (w - w_q) / d
+   678→                quantized[feature_idx] = q
+   679→                weight_block_t[i:, :] -= torch.einsum('i,j->ji', err_feature,
+   680→                                                      Hinv_block[i, i:])
+   681→                err_block_t[i, :] = err_feature
+   682→            weight_update_t[i2:, :] -= torch.einsum('bo,br->ro', err_block_t,
+   683→                                                    Hinv[i1:i2, i2:])
+   684→
+   685→            group_idx = i1 // block_size
+   686→            scales[group_idx] = s.to(dtype).reshape(out_features)
+   687→            if asymmetric:
+   688→                zeros[group_idx] = z.to(dtype).reshape(out_features)
+   689→
+   690→        if group_reorder:
+   691→            quantized = quantized[perm_inv, :]
+   692→            scales = scales[group_perm_inv, :]
+   693→            zeros = zeros[group_perm_inv, :] if asymmetric else 0
+   694→
+   695→        quantized = quantized.t().contiguous()
+   696→        scales = scales.t().contiguous()
+   697→        zeros = zeros.t().contiguous() if asymmetric else 0
+   698→        del Hinv
+   699→        del weight_update_t
+   700→
+   701→        if fake:
+   702→            dequantized = cls.__dequantize_weight_tensor(
+   703→                quantized, scales, zeros, group_size)
+   704→            return dequantized
+   705→        else:
+   706→            if bit_width == 8:
+   707→                dtype = torch.uint8 if asymmetric else torch.int8
+   708→            elif bit_width == 4:
+   709→                # To support the 4-bit, maybe by packing.
+   710→                dtype = torch.uint8 if asymmetric else torch.int8
+   711→            else:
+   712→                raise ValueError("Unsupported bit-width.")
+   713→            quantized = quantized.to(dtype).reshape(out_features, in_features)
+   714→            scales = scales.reshape(out_features, -1).t().contiguous()
+   715→            zeros = zeros.to(dtype).reshape(
+   716→                out_features, -1).t().contiguous() if asymmetric else zeros
+   717→            return quantized, scales, zeros
+   718→
+   719→    @classmethod
+   720→    @torch.no_grad()
+   721→    def quantize_linear_weight(cls,
+   722→                               weight: torch.Tensor,
+   723→                               activation: torch.Tensor,
+   724→                               config: QuantConfig,
+   725→                               fake: bool = True,
+   726→                               info: str = None):
+   727→        config.verify(weight.shape)
+   728→        uniform_bit = config.get_uniform_bit(weight.shape)
+   729→
+   730→        quantized = torch.empty_like(weight)
+   731→
+   732→        if not fake:
+   733→            weight_int = {}
+   734→            weight_scale = {}
+   735→            weight_zero = {}
+   736→            weigth_indices = {}
+   737→        # Quantize different bit-widths separately.
+   738→        for bit_width, config_map in config.bit_config_map.items():
+   739→            group_size = config_map['group_size']
+   740→            asymmetric = config_map['asymmetric']
+   741→            # The weight's layout is [out_features, in_features]
+   742→            indices = config_map.get('indices', None)
+   743→            if (indices is None) and (uniform_bit == bit_width):
+   744→                # This means the weight is quantized uniformly.
+   745→                weight_chunk = weight
+   746→            elif indices:
+   747→                weight_chunk = weight[indices]
+   748→            else:
+   749→                # This means no quantization for this bit-width.
+   750→                continue
+   751→
+   752→            is_gptq = config_map.get('gptq', False)
+   753→            enable_clip_shrink = config_map.get('clip_shrink', False)
+   754→            if is_gptq:
+   755→                group_reorder = config_map.get('gptq_group_reorder', True)
+   756→                try:
+   757→                    # reorder = False
+   758→                    # jit_group_param = False
+   759→                    if fake:
+   760→                        quantized_chunk = cls.__quantize_weight_gptq(
+   761→                            weight_chunk,
+   762→                            activation,
+   763→                            bit_width,
+   764→                            group_size,
+   765→                            asymmetric,
+   766→                            group_reorder,
+   767→                            # reorder,
+   768→                            # jit_group_param,
+   769→                            enable_clip_shrink,
+   770→                            fake=fake)
+   771→                    else:
+   772→                        weight_int[bit_width], weight_scale[bit_width], weight_zero[bit_width]\
+   773→                            = cls.__quantize_weight_gptq(
+   774→                                weight_chunk,
+   775→                                activation,
+   776→                                bit_width,
+   777→                                group_size,
+   778→                                asymmetric,
+   779→                                group_reorder,
+   780→                                # reorder,
+   781→                                # jit_group_param,
+   782→                                enable_clip_shrink,
+   783→                                fake=fake)
+   784→                        weigth_indices[bit_width] = indices
+   785→                except Exception as e:
+   786→                    logger.warning(f"Disable GPTQ for {info} due to {e}")
+   787→                    is_gptq = False
+   788→            if not is_gptq:
+   789→                assert fake == True, "Real quantization for RTN is not implemented yet."
+   790→                quantized_chunk = cls.__quantize_weight_rtn(weight_chunk,
+   791→                                                            activation,
+   792→                                                            bit_width,
+   793→                                                            group_size,
+   794→                                                            asymmetric,
+   795→                                                            enable_clip_shrink,
+   796→                                                            fake=fake)
+   797→        if fake:
+   798→            if cls.__DEBUG:
+   799→                assert quantized_chunk.isnan().sum() == 0
+   800→                assert quantized_chunk.isinf().sum() == 0
+   801→            if indices is None:
+   802→                quantized = quantized_chunk
+   803→            else:
+   804→                quantized[indices] = quantized_chunk
+   805→            return quantized
+   806→        else:
+   807→            return weight_int.get(8, None), weight_scale.get(8, None), weigth_indices.get(8, None), \
+   808→                   weight_int.get(4, None), weight_scale.get(4, None), \
+   809→                   weight_zero.get(4, None), weigth_indices.get(4, None)
+   810→
+   811→    @classmethod
+   812→    def quantize_activation(cls,
+   813→                            activation: torch.Tensor,
+   814→                            bit_width: int,
+   815→                            group_size: int,
+   816→                            asymmetric: bool,
+   817→                            fake: bool = True,
+   818→                            info: str = None):
+   819→        assert fake == True
+   820→        # assert activation.dim() == 3
+   821→        hidden_size = activation.shape[-1]
+   822→        scales, zeros, min_int, max_int = cls.__get_quant_param(
+   823→            activation.reshape(-1, hidden_size), bit_width, group_size,
+   824→            asymmetric)
+   825→
+   826→        return cls.__quantize_with_param(activation, bit_width, group_size,
+   827→                                         asymmetric, scales, zeros, min_int,
+   828→                                         max_int, fake)
+   829→
+   830→    @classmethod
+   831→    def __dequantize_weight_tensor(cls, quantized, scales, zeros, group_size):
+   832→        out_features, in_features = quantized.shape
+   833→        if group_size > 0:
+   834→            assert in_features % group_size == 0
+   835→        else:
+   836→            group_size = in_features
+   837→        num_groups_per_channel = in_features // group_size
+   838→        group_number = out_features * num_groups_per_channel
+   839→        quantized = quantized.reshape(group_number, group_size)
+   840→        scales = scales.reshape(group_number, 1)
+   841→        zeros = zeros.reshape(group_number, 1) if isinstance(
+   842→            zeros, torch.Tensor) else zeros
+   843→        dequantized = (quantized - zeros) * scales
+   844→        return dequantized.reshape(out_features, in_features)
+   845→
+   846→    @classmethod
+   847→    @torch.no_grad()
+   848→    def __qunatize_model_rtn(cls, model, mixllm_config: MixLLMConfig) -> None:
+   849→        weight_config = mixllm_config.weight_config
+   850→        assert len(weight_config) == 1
+   851→
+   852→        bit_width = list(weight_config.keys())[0]
+   853→        config_map = weight_config[bit_width]
+   854→        group_size = config_map['group_size']
+   855→        asymmetric = config_map['asymmetric']
+   856→
+   857→        named_linears = modeling.get_named_linears_in_transformer_layers(model)
+   858→        desc = 'Quant weight'
+   859→        tqdm_bar = tqdm(desc=desc, total=len(named_linears))
+   860→        for _, linear in named_linears:
+   861→            device = next(linear.parameters()).device
+   862→            weight_quant = cls.__quantize_weight_rtn(
+   863→                weight=linear.weight.cuda(),
+   864→                activation=None,
+   865→                bit_width=bit_width,
+   866→                group_size=group_size,
+   867→                asymmetric=asymmetric,
+   868→                fake=True)
+   869→            if cls.__DEBUG:
+   870→                assert weight_quant.isnan().sum() == 0
+   871→                assert weight_quant.isinf().sum() == 0
+   872→            linear.weight.data = weight_quant.data.to(device)
+   873→            tqdm_bar.update(1)
+   874→        tqdm_bar.close()
+   875→
+   876→    @classmethod
+   877→    @torch.no_grad()
+   878→    def __quantize_model_advanced(cls, model, calib_input: torch.Tensor,
+   879→                                  mixllm_config: MixLLMConfig) -> None:
+   880→        named_linears = modeling.get_named_linears_in_transformer_layers(model)
+   881→        desc = 'Quant weight'
+   882→        tqdm_bar = tqdm(desc=desc, total=len(named_linears))
+   883→
+   884→        if False:
+   885→            print(f"keys in map: {mixllm_config.linear_config_map.keys()}")
+   886→
+   887→        @torch.no_grad()
+   888→        def swap_in_pre_hook(module, args):
+   889→            '''
+   890→            This will: 1) swap the module to the GPU; 2) quantize the weight and
+   891→            update the module inplace.
+   892→            TODO: update the config.
+   893→            '''
+   894→            module.cuda()
+   895→
+   896→            # quantize the weight
+   897→            weight = module.weight
+   898→            input = args[0]
+   899→            name = module.name
+   900→            linear_config = mixllm_config.linear_config_map[name]
+   901→            if False:
+   902→                print(f"name of linear: {name}")
+   903→
+   904→            fake = False
+   905→            if fake:
+   906→                weight_quant = cls.quantize_linear_weight(weight,
+   907→                                                          input,
+   908→                                                          linear_config,
+   909→                                                          fake=True,
+   910→                                                          info=name)
+   911→                module.weight.data = weight_quant.data
+   912→
+   913→            else:
+   914→                matrix_B_int8, matrix_scale_int8, matrix_indices_int8, \
+   915→                matrix_B_int4, matrix_scale_int4, matrix_zero, matrix_indices_int4 \
+   916→                    = cls.quantize_linear_weight(weight,
+   917→                                                input,
+   918→                                                linear_config,
+   919→                                                fake=False,
+   920→                                                info=name)
+   921→                lmixllm = LinearMixLLM4vLLM(
+   922→                    matrix_B_int8=matrix_B_int8,
+   923→                    matrix_B_int4=matrix_B_int4,
+   924→                    matrix_scale_int8=matrix_scale_int8,
+   925→                    matrix_scale_int4=matrix_scale_int4,
+   926→                    matrix_zero_int4=matrix_zero,
+   927→                    matrix_indices_int8=matrix_indices_int8,
+   928→                    matrix_indices_int4=matrix_indices_int4,
+   929→                    bias=module.bias)
+   930→                modeling.recursive_setattr(model, name, lmixllm)
+   931→
+   932→            gc.collect()
+   933→            torch.cuda.empty_cache()
+   934→
+   935→            tqdm_bar.update(1)
+   936→
+   937→        @torch.no_grad()
+   938→        def swap_out_post_hook(module, args, output):
+   939→            # Swap the module back to the CPU.
+   940→            module.cpu()
+   941→
+   942→        handles = []
+   943→        for name, linear in named_linears:
+   944→            pre_handle = linear.register_forward_pre_hook(swap_in_pre_hook)
+   945→            handles.append(pre_handle)
+   946→            handle = linear.register_forward_hook(swap_out_post_hook)
+   947→            handles.append(handle)
+   948→            linear.name = name
+   949→        output_embeddings = modeling.get_output_embeddings(model)
+   950→        # The output embedding can be memory consuming for some models with
+   951→        # large vocabulary size. Skip it.
+   952→        stop_handle = output_embeddings.register_forward_pre_hook(
+   953→            _exit_fwd_pre_hook)
+   954→
+   955→        # Place the layers except for the linears in decoders to GPU.
+   956→        modeling.move_non_decoder_linear_to_device(model, 'cuda')
+   957→        try:
+   958→            with torch.no_grad():
+   959→                model(input_ids=calib_input, use_cache=False)
+   960→        except _EarlyExitException:
+   961→            pass
+   962→        modeling.move_non_decoder_linear_to_device(model, 'cpu')
+   963→
+   964→        stop_handle.remove()
+   965→        for handle in handles:
+   966→            handle.remove()
+   967→        gc.collect()
+   968→        tqdm_bar.close()
+   969→
+   970→    @classmethod
+   971→    @torch.no_grad()
+   972→    def quantize_model_fake(cls, model, calib_input: torch.Tensor,
+   973→                            mixllm_config: MixLLMConfig) -> None:
+   974→        cls.__quantize_model_advanced(model, calib_input, mixllm_config)
+   975→
+   976→        if mixllm_config.activation_config and (
+   977→                mixllm_config.activation_config['bit_width'] < 16):
+   978→            named_linears = modeling.get_named_linears_in_transformer_layers(
+   979→                model)
+   980→            for name, linear in tqdm(named_linears,
+   981→                                     desc='Quant activation',
+   982→                                     total=len(named_linears)):
+   983→                # quantize the activation
+   984→                need_bias = False
+   985→                if hasattr(linear, 'bias') and linear.bias is not None:
+   986→                    need_bias = True
+   987→                new_linear = QuantizedLinearLayer(
+   988→                    activation_config=mixllm_config.activation_config,
+   989→                    # the original Linear parameters:
+   990→                    in_features=linear.in_features,
+   991→                    out_features=linear.out_features,
+   992→                    bias=need_bias,
+   993→                    device=linear.weight.device,
+   994→                    dtype=linear.weight.dtype)
+   995→                new_linear.weight.data = linear.weight.data
+   996→                if need_bias:
+   997→                    new_linear.bias.data = linear.bias.data
+   998→                modeling.recursive_setattr(model, name, new_linear)
+   999→                del linear
+  1000→

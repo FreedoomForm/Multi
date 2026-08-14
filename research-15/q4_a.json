@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1rxwbh9/help_qwen3527bgptq_oom_on_32gb_vram_video",
+    "name": "[Help] Qwen3.5-27B-GPTQ OOM on 32GB VRAM",
+    "snippet": "I'm trying to run Qwen3 .5-27B- GPTQ - Int4 for video understanding on a single 32GB VRAM GPU (RTX 5090), but I'm hitting a wall with VRAM ... Read more",
+    "host_name": "www.reddit.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/llm-compressor/issues/2039",
+    "name": "High Host Memory Usage During GPTQ Quantization of",
+    "snippet": "Nov 17, 2025 — During quantization , the host memory usage grows until it is completely exhausted (all 500GB consumed), even though the GPU has sufficient VRAM. Read more",
+    "host_name": "github.com",
+    "rank": 1,
+    "date": "Nov 17, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://discuss.vllm.ai/t/trying-to-run-qwen3-5-397b-a17b-gptq-int4/2450",
+    "name": "Trying to run Qwen3.5-397B-A17B-GPTQ-Int4",
+    "snippet": "Mar 12, 2026 — Yes, Qwen3 .5-397B-A17B- GPTQ - Int4 is supported on Ubuntu 22 with vLLM, but your error is due to specifying the model path incorrectly. Read more",
+    "host_name": "discuss.vllm.ai",
+    "rank": 2,
+    "date": "Mar 12, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://medium.com/@bnjmn_marie/how-well-does-qwen3-handle-4-bit-and-2-bit-quantization-e3a07dd2c995",
+    "name": "How Well Does Qwen3 Handle 4-bit and 2-bit Quantization?",
+    "snippet": "This MoE design makes it very lightweight, a quantized version can fit comfortably on a 24 GB GPU, and run efficiently when paired with GPU- ... Read more",
+    "host_name": "medium.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.readthedocs.io/en/latest/quantization/gptq.html",
+    "name": "GPTQ - Qwen",
+    "snippet": "GPTQ is a quantization method for GPT-like LLMs, which uses one-shot weight quantization based on approximate second-order information. Read more",
+    "host_name": "qwen.readthedocs.io",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://kaitchup.substack.com/p/gptq-or-bitsandbytes-which-quantization",
+    "name": "GPTQ or bitsandbytes: Which Quantization Method to Use for",
+    "snippet": "There are two popular quantization methods for LLMs: GPTQ and bitsandbytes .",
+    "host_name": "kaitchup.substack.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://rocm.docs.amd.com/en/docs-6.2.4/how-to/llm-fine-tuning-optimization/model-quantization.html",
+    "name": "Model quantization techniques - ROCm Documentation - AMD",
+    "snippet": "GPTQ is a post-training quantization technique where each row of the weight matrix is quantized independently to find a version of the weights that minimizes ... Read more",
+    "host_name": "rocm.docs.amd.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3.5-397B-A17B-GPTQ-Int4",
+    "name": "Qwen/Qwen3.5-397B-A17B-GPTQ-Int4",
+    "snippet": "Mar 9, 2026 — The model has a default context length of 262,144 tokens. If you encounter out-of- memory ( OOM ) errors, consider reducing the context window. Read more",
+    "host_name": "huggingface.co",
+    "rank": 7,
+    "date": "Mar 9, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org/html/2505.02214v1",
+    "name": "An Empirical Study of Qwen3 Quantization",
+    "snippet": "May 4, 2025 — We evaluate low-bit quantization across Qwen3's post-training models (0.6B, 1.8B, 4B, 7B , 14B, and 72B) as well as their pretraining ... Read more",
+    "host_name": "arxiv.org",
+    "rank": 8,
+    "date": "May 4, 2025",
+    "favicon": ""
+  }
+]

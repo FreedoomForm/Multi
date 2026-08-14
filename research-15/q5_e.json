@@ -1,0 +1,56 @@
+[
+  {
+    "url": "https://github.com/vllm-project/vllm/releases",
+    "name": "Releases · vllm-project/vllm",
+    "snippet": "vLLM v0.27.0 Release Notes Highlights This release features 561 commits from 242 contributors (64 new)! This release features 558 commits from 232 contributors ...",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.vllm.ai/projects/ascend/en/v0.13.0/user_guide/release_notes.html",
+    "name": "Release Notes — vllm-ascend",
+    "snippet": "We landed lots of bug fix, performance improvement and feature support in this release . is stable and performance is improved.",
+    "host_name": "docs.vllm.ai",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.nvidia.com/deeplearning/frameworks/vllm-release-notes/index.html",
+    "name": "vLLM Release Notes - NVIDIA Docs",
+    "snippet": "These release notes describe the key features, software enhancements, improvements, and known issues for this release of vLLM.",
+    "host_name": "docs.nvidia.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.vllm.ai/projects/ascend/en/latest/user_guide/release_notes.html",
+    "name": "Release Notes - vLLM Ascend",
+    "snippet": "This release includes significant performance optimizations, new model support, hardware expansion, and important bug fixes. Please follow the official doc to ...",
+    "host_name": "docs.vllm.ai",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://pypi.org/project/vllm",
+    "name": "vllm · PyPI",
+    "snippet": "3 days ago — A high-throughput and memory-efficient inference and serving engine for LLMs. We have built a vLLM website to help you get started with vLLM . ...",
+    "host_name": "pypi.org",
+    "rank": 4,
+    "date": "Aug 11, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.vllm.ai/projects/ascend/en/v0.11.0/user_guide/release_notes.html",
+    "name": "Release Notes — vllm-ascend",
+    "snippet": "v0.9.1 - 2025.09.03# This release includes many feature supports, performance improvements and bug fixes. Dynamic and Static EPLB support is added.",
+    "host_name": "docs.vllm.ai",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  }
+]

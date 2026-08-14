@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://www.linkedin.com/posts/joelniklaus_last-week-i-ran-some-inference-speed-benchmarking-activity-7374091031794851841-QzgM",
+    "name": "Joel Niklaus - Inference Speed Benchmarking with vLLM",
+    "snippet": "The speedup for the 27B model is remarkable: from 310 (TP1) to 670 (TP2) to 700 (TP4) output tokens /s. With 16K input and 4K output tokens , the ... Read more",
+    "host_name": "www.linkedin.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://lightning.ai/lightning-ai/studios/optimized-llm-inference-api-for-mistral-7b-using-vllm",
+    "name": "Optimized LLM inference API for Mistral 7B using vLLM",
+    "snippet": "Jan 8, 2024 — Average tokens/sec: 30.930 Our model has an average inference speed of 30.9 tokens per second on a GPU. We went from 30.9 tokens/sec to 64.5  ...",
+    "host_name": "lightning.ai",
+    "rank": 1,
+    "date": "Jan 8, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://saumilya.medium.com/i-ran-133-benchmarks-to-find-out-if-vllm-is-actually-faster-than-huggingface-b75f4fb6b3bd",
+    "name": "I ran 133 benchmarks to find out if vLLM is actually faster than",
+    "snippet": "vLLM and HF both sit in the 11–14 tokens / second range for these 4-bit models on a V100. The best single configuration observed was vLLM + ... Read more",
+    "host_name": "saumilya.medium.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://vllm.ai/blog/2024-09-05-perf-update",
+    "name": "vLLM v0.6.0: 2.7x Throughput Improvement and 5x Latency",
+    "snippet": "Sep 5, 2024 — vLLM achieves 2.7x higher throughput and 5x faster TPOT (time per output token ) on Llama 8B model , and 1.8x higher throughput and 2x less TPOT ...",
+    "host_name": "vllm.ai",
+    "rank": 3,
+    "date": "Sep 5, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1ajb5r5/vllm_mixtral_speed_seems_off",
+    "name": "vLLM & Mixtral speed seems off? : r/LocalLLaMA",
+    "snippet": "Not sure if its my configuration, but im using a cloud machine - A100 80G, loaded it using the following settings:\n\nllm = LLM( model=\"casperhansen/mixtral-instr ...",
+    "host_name": "www.reddit.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://home.mlops.community/public/blogs/exploring-llms-speed-benchmarks-independent-analysis",
+    "name": "Exploring LLMs Speed Benchmarks - Blog",
+    "snippet": "Jun 24, 2024 — Gemma 7Bn, using Text Generation Inference , showed impressive performance of approximately 65.86 tokens / sec with 20 input tokens and 100 output ... Read more",
+    "host_name": "home.mlops.community",
+    "rank": 5,
+    "date": "Jun 24, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://news.ycombinator.com/item?id=37697751",
+    "name": "VLLM with Mistral 7B guide and benchmarks (1.8k+ tokens/s)",
+    "snippet": "Sep 29, 2023 — Managed to get 1.8k tokens per second with a batch of 60 when running vLLM with Mistral 7B on an A100 40GB in bfloat16 mode. Pretty damn fast! Read more",
+    "host_name": "news.ycombinator.com",
+    "rank": 6,
+    "date": "Sep 29, 2023",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org/html/2511.17593v1",
+    "name": "A Performance Study of vLLM and HuggingFace TGI",
+    "snippet": "Nov 17, 2025 — LLaMA-2-7B: vLLM achieves peak throughput of 15,243 tokens/sec at 100 concurrent requests, compared to TGI's 4,156 tokens/sec—a 3.67x advantage. Read more",
+    "host_name": "arxiv.org",
+    "rank": 7,
+    "date": "Nov 17, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.databasemart.com/blog/vllm-gpu-benchmark-v100-3?srsltid=AfmBOor0DP-iB4vSBglFgCOz3yyXJMzJELxnOG0njA3cc9DkDIUumQZo",
+    "name": "3×V100 vLLM Benchmark: Multi-GPU Inference",
+    "snippet": "Aug 3, 2026 — Qwen 7B (TP=2, PP=1): Reached 1,384 tokens/s , significantly outperforming Gemma 3-12B due to its lower parameter count. Qwen 14B (TP=1, PP=3): ... Read more",
+    "host_name": "www.databasemart.com",
+    "rank": 8,
+    "date": "Aug 3, 2026",
+    "favicon": ""
+  }
+]

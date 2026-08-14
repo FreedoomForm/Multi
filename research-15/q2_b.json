@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://arxiv.org/html/2505.02214v1",
+    "name": "An Empirical Study of Qwen3 Quantization",
+    "snippet": "May 4, 2025 — This study conducts a systematic evaluation of Qwen3's robustness under various quantization settings, aiming to uncover both opportunities and ...",
+    "host_name": "arxiv.org",
+    "rank": 0,
+    "date": "May 4, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/Efficient-ML/Qwen3-Quantization",
+    "name": "AI-Efficiency/Qwen3-Quantization-Toolkit",
+    "snippet": "This project provides various quantization method implementations for the Qwen3 large language model. Quantization can significantly reduce model size and ... Read more",
+    "host_name": "github.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://ui.adsabs.harvard.edu/abs/2025arXiv250502214Z/abstract",
+    "name": "An Empirical Study of Qwen3 Quantization - ADS",
+    "snippet": "by X Zheng · 2025 · Cited by 29 — This study conducts a systematic evaluation of Qwen3's robustness under various quantization settings, aiming to uncover both opportunities and challenges. Our ...",
+    "host_name": "ui.adsabs.harvard.edu",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.researchgate.net/publication/403888273_An_empirical_study_of_Qwen3_quantization",
+    "name": "(PDF) An empirical study of Qwen3 quantization",
+    "snippet": "Jul 8, 2026 — This study conducts a systematic evaluation of Qwen3's robustness under various quantization settings, aiming to identify both the opportunities ... Read more",
+    "host_name": "www.researchgate.net",
+    "rank": 3,
+    "date": "Jul 8, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/qwenLM/qwen3",
+    "name": "Qwen3 is the large language model series",
+    "snippet": "Qwen3 is the large language model series developed by Qwen team, Quantization: the practice of quantizing LLMs with GPTQ, AWQ, to make high-quality quantized ...",
+    "host_name": "github.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/reinterpretcat/qwen3-rs",
+    "name": "reinterpretcat/qwen3-rs: An educational Rust project for",
+    "snippet": "qwen3-rs is an educational Rust project for exploring and running Qwen3 language family models. Learn how transformer architectures, quantization, and ...",
+    "host_name": "github.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwenlm.github.io/blog/qwen3",
+    "name": "Qwen3: Think Deeper, Act Faster",
+    "snippet": "Apr 29, 2025 — Qwen3 , the latest addition to the Qwen family of large language models. achieves competitive results in benchmark evaluations of coding, math, ...",
+    "host_name": "qwenlm.github.io",
+    "rank": 6,
+    "date": "Apr 29, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.semanticscholar.org/paper/An-Empirical-Study-of-Qwen3-Quantization-Zheng-Li/5d001c46eb8bfddfe3a797f4ad46c5969d350dfb",
+    "name": "An Empirical Study of Qwen3 Quantization",
+    "snippet": "Qwen3 maintains competitive performance at moderate bit-widths , it experiences notable degradation in linguistic tasks",
+    "host_name": "www.semanticscholar.org",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/QwenLM/Qwen3/blob/main/docs/source/quantization/awq.md",
+    "name": "Qwen3/docs/source/quantization/awq.md at main",
+    "snippet": "AutoAWQ is an easy-to-use Python library for 4-bit quantized models. AutoAWQ speeds up models by 3x and reduces memory requirements by 3x compared to FP16. Read more",
+    "host_name": "github.com",
+    "rank": 8,
+    "date": "",
+    "favicon": ""
+  }
+]

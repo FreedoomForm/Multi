@@ -1,0 +1,47 @@
+[
+  {
+    "url": "https://discuss.vllm.ai/t/docker-image-vllm-vllm-openai-v0-9-0-doesnt-work-on-5090/761",
+    "name": "Docker image `vllm/vllm-openai:v0.9.0` doesn't work on 5090",
+    "snippet": "Jun 5, 2025 — Issue #14452 · vllm-project/vllm · GitHub, I could built vllm v0.9.0 docker image and run it on 5090, but DockerHub– vLLM v0.9.0 doesn't with ... Read more",
+    "host_name": "discuss.vllm.ai",
+    "rank": 0,
+    "date": "Jun 5, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/issues/16901",
+    "name": "[Bug]: RuntimeError on RTX 5090: \"no kernel image is",
+    "snippet": "Apr 20, 2025 — good news: RTX 5090 + vllm: works with v0.9.0. Wait for the official docker (or build it yourself). vllm v0.9.0 has been released 4 days ago! Read more",
+    "host_name": "github.com",
+    "rank": 1,
+    "date": "Apr 20, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/snowflakedb/ArcticInference/releases",
+    "name": "Releases · snowflakedb/ArcticInference",
+    "snippet": "Update and Fixes for documentation by @sfc-gh-aqiao in #101; Add Docs CI by @sfc-gh-mwyatt in #86; Upgrade to vLLM v0.9.0 .1 by @sfc-gh-aqiao in #89; ignore ... Read more",
+    "host_name": "github.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm-ascend/issues/1038",
+    "name": "[Bug]: Failed to complete vllm benchmark after enable",
+    "snippet": "May 30, 2025 — Your current environment vLLM v0.9.0 vLLM Ascend main v0 ... [ release ] 0.9.0rc1 release checklist #904. Yikun commented on Jun 7 ... Read more",
+    "host_name": "github.com",
+    "rank": 3,
+    "date": "May 30, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/issues/19123",
+    "name": "[Bug]: Failed to start vLLM v1 with Ray.",
+    "snippet": "Jun 3, 2025 — Unfortunately, even after switching to H100 and vLLM v0.9.0 , I still encountered the same error. I suspect that this issue might be caused ... Read more",
+    "host_name": "github.com",
+    "rank": 4,
+    "date": "Jun 3, 2025",
+    "favicon": ""
+  }
+]

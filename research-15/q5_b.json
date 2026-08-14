@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://67ailab.com/posts/vllm-qwen-35b-t4-gpu-guide",
+    "name": "Running vLLM with Qwen3.5-35B GPTQ on 4× Nvidia T4 GPUs",
+    "snippet": "Mar 21, 2026 — Comprehensive guide to running Qwen3.5-35B GPTQ Int4 on 4× Nvidia T4 16GB GPUs using vLLM with tensor parallelism.",
+    "host_name": "67ailab.com",
+    "rank": 0,
+    "date": "Mar 21, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1rxwbh9/help_qwen3527bgptq_oom_on_32gb_vram_video",
+    "name": "[Help] Qwen3.5-27B-GPTQ OOM on 32GB VRAM",
+    "snippet": "vLLM reports that the model/infra is eating 27.51 GiB before the KV cache even starts, leaving almost zero room for context. vram + 16gb ram ?",
+    "host_name": "www.reddit.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/issues/28230",
+    "name": "[Bug]: GPU VRAM continuously increase during Qwen3-VL",
+    "snippet": "Nov 6, 2025 — When available VRAM drops below 500MB, OOM occurs during new requests. VRAM cannot continuously increase and eventually hit OOM . the inference ...",
+    "host_name": "github.com",
+    "rank": 2,
+    "date": "Nov 6, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://discuss.vllm.ai/t/does-vllm-inference-work-with-qwen3-vl-30b/2053",
+    "name": "Does vllm inference work with Qwen3-VL-30B - General",
+    "snippet": "Nov 30, 2025 — This is a known issue, and there is no confirmed solution in the official vLLM releases as of now. OOM or illegal memory access errors persist,",
+    "host_name": "discuss.vllm.ai",
+    "rank": 3,
+    "date": "Nov 30, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4/discussions/3",
+    "name": "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4 · Working vLLM setup",
+    "snippet": "Use this model Instructions to use Qwen/ Qwen3 .5-35B-A3B-GPTQ-Int4 with libraries, inference providers, notebooks, and local apps. Install from pip and serve ...",
+    "host_name": "huggingface.co",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://medium.com/@justinduy/understanding-parallelisms-in-vllm-case-study-with-qwen3-30b-a3b-thinking-2507-on-a10g-gpus-59821cb20c6e",
+    "name": "Case Study with Qwen3–30B-A3B-Thinking-2507 on A10G",
+    "snippet": "If you want to host large language models (LLMs) on consumer-grade hardware understanding vLLM parallelism is essential.",
+    "host_name": "medium.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.readthedocs.io/en/latest/deployment/vllm.html",
+    "name": "vLLM - Qwen",
+    "snippet": "Qwen3 models will think before respond. This behavior could be controlled by either the hard switch, which could disable thinking completely, or the soft switch ... Read more",
+    "host_name": "qwen.readthedocs.io",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.spheron.network/blog/llm-inference-slow",
+    "name": "Why Your LLM Inference Is Slow (And How to Fix It)",
+    "snippet": "Mar 29, 2026 — LLM inference slow? Seven common causes with fixes: VRAM spillover, no KV cache, FP16 overhead, static batching, no FlashAttention, ...",
+    "host_name": "www.spheron.network",
+    "rank": 7,
+    "date": "Mar 29, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://forums.developer.nvidia.com/t/spark-vllm-docker-runs-out-of-memory-loading-qwen3-5-397b-a17b-int4-autoround/369076",
+    "name": "Spark-vllm-docker runs out of memory loading Qwen3.5-",
+    "snippet": "May 5, 2026 — I've been trying to troubleshoot a peculiar memory problem over the past 3 days where loading Qwen3 .5-397B-A17B-int4-AutoRound across two Sparks ... Read more",
+    "host_name": "forums.developer.nvidia.com",
+    "rank": 8,
+    "date": "May 5, 2026",
+    "favicon": ""
+  }
+]

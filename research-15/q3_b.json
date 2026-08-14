@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://github.com/microsoft/MixLLM",
+    "name": "MixLLM: Mixed-Precision Quantization for Efficient LLM",
+    "snippet": "MixLLM offers flexible quantization solutions, supporting the mix of 4-bit and 8-bit in a single linear layer (e.g., W4 . 4A8 where the weight of the model are ... Read more",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org/html/2412.14590v2",
+    "name": "1 Introduction",
+    "snippet": "Extensive evaluation shows that, with 10% 8-bit and 90% 4-bit (i.e., W4 . 4A8 ), MixLLM significantly outperforms SOTA quantization algorithms while achieving the ... Read more",
+    "host_name": "arxiv.org",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://proceedings.mlsys.org/paper_files/paper/2026/hash/a66caa1703fe34705a4368c3014c1966-Abstract-Conference.html",
+    "name": "MixLLM: LLM Quantization with Global Mixed-precision",
+    "snippet": "by Z Zheng · 2026 · Cited by 14 — In this paper, we propose MixLLM that explores the optimization space of mixed-precision quantization between output features, based on the insight that ... Read more",
+    "host_name": "proceedings.mlsys.org",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.alphaxiv.org/overview/2412.14590",
+    "name": "MixLLM: LLM Quantization with Global Mixed-precision",
+    "snippet": "MixLLM W4 . 4A8 (where 10% of weights are 8-bit and 90% are 4-bit) achieved perplexity scores very close to the original 16-bit floating-point models.",
+    "host_name": "www.alphaxiv.org",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/microsoft/MixLLM/activity?sort=ASC",
+    "name": "Activity · microsoft/MixLLM",
+    "snippet": "LLM Quantization with Global Mixed-precision between Output-features and Highly-efficient System Design - Activity · microsoft / MixLLM .",
+    "host_name": "github.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/microsoft/MixLLM/labels",
+    "name": "Labels · microsoft/MixLLM",
+    "snippet": "LLM Quantization with Global Mixed-precision between Output-features and Highly-efficient System Design - Labels · microsoft / MixLLM .",
+    "host_name": "github.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org/pdf/2412.14590",
+    "name": "MixLLM: LLM Quantization with Global Mixed-precision",
+    "snippet": "by Z Zheng · 2024 · Cited by 14 — Extensive evaluation shows that, with 10% 8-bit and 90%. 4-bit (i.e., W4 . 4A8 ), MixLLM significantly outperforms. SOTA quantization algorithms while achieving ... Read more",
+    "host_name": "arxiv.org",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1ka69xf/httpsqwenlmgithubioblogqwen3",
+    "name": "https://qwenlm.github.io/blog/qwen3/ : r/LocalLLaMA",
+    "snippet": "Qwen3-30B-A3B is much better than GPT-4o and should run fast on a Macbook Air. Insane. I should be shorting Nvidia stock right now. Read more",
+    "host_name": "www.reddit.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.vllm.ai/projects/ascend/en/v0.18.0/tutorials/models/Qwen3-8B-W4A8.html",
+    "name": "Qwen3-8B-W4A8",
+    "snippet": "Qwen3-8B-W4A8#. Run Docker Container#. Note. w4a8 quantization feature is supported by v0.9.1rc2 and later . Read more",
+    "host_name": "docs.vllm.ai",
+    "rank": 8,
+    "date": "",
+    "favicon": ""
+  }
+]

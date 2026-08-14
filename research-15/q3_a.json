@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-1.7B",
+    "name": "Qwen/Qwen3-1.7B",
+    "snippet": "May 14, 2025 — Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) ... Read more",
+    "host_name": "huggingface.co",
+    "rank": 0,
+    "date": "May 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/lmstudio-community/Qwen3-1.7B-GGUF",
+    "name": "lmstudio-community/Qwen3-1.7B-GGUF",
+    "snippet": "Supports a context length of up to 32k tokens . Supports both thinking and non Excels at creative writing, role-playing, multi-turn dialogues, and instruction",
+    "host_name": "huggingface.co",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.kdnuggets.com/best-small-language-models-on-hugging-face-right-now",
+    "name": "Best Small Language Models on Hugging Face Right Now!",
+    "snippet": "May 21, 2026 — Qwen3-0.6B , at just 600 million parameters, supports over 100 languages because its training corpus was built with that goal in mind, not as an ...",
+    "host_name": "www.kdnuggets.com",
+    "rank": 2,
+    "date": "May 21, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.facebook.com/groups/698593531630485/posts/1276956190460880",
+    "name": "Qwen3 models updated with local support and mitigations",
+    "snippet": "Qwen3 models released just days ago and many common tools have caught up quickly! For those running models locally, oobabooga text-generation-webui ...",
+    "host_name": "www.facebook.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen",
+    "name": "Qwen",
+    "snippet": "Welcome to Qwen. This is the organization of Qwen, which refers to the large language model family built by Alibaba Cloud. In this organization ... Read more",
+    "host_name": "huggingface.co",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1k9udty/qwen_3_is_now_on_huggingface",
+    "name": "Qwen 3 is now on huggingface : r/LocalLLaMA",
+    "snippet": "Comparison of Qwen 3 models on Hugging Face Update [They made it. Qwen3-1.7B-FP8 ・ 7B is out 471 ・ now on Hugging Face LocalLLM",
+    "host_name": "www.reddit.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://ai.azure.com/catalog/models/qwen-qwen3-vl-30b-a3b-thinking",
+    "name": "qwen-qwen3-vl-30b-a3b-thinking",
+    "snippet": "Explore the comprehensive catalog of AI models from Microsoft Foundry. Hugging Face Version: 3 … supported, like text, images, and audio. This model supports ...",
+    "host_name": "ai.azure.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-8B",
+    "name": "Qwen/Qwen3-8B",
+    "snippet": "May 14, 2025 — Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE)  ...",
+    "host_name": "huggingface.co",
+    "rank": 7,
+    "date": "May 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list",
+    "name": "Qwen3-Next-80B-A3B",
+    "snippet": "Sep 10, 2025 — We have already released Qwen3 -Next on Hugging Face and ModelScope. ... For the Thinking model , please refer to https:// huggingface .co/Qwen ... Read more",
+    "host_name": "qwen.ai",
+    "rank": 8,
+    "date": "Sep 10, 2025",
+    "favicon": ""
+  }
+]

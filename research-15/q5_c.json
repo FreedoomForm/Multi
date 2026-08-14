@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://github.com/vllm-project/vllm/issues/963",
+    "name": "Support for compute capability <7.0 · Issue #963 · vllm-",
+    "snippet": "Sep 6, 2023 — vLLM may work without any modification: MOVE \" GPUs with compute capability below 7.0 are not supported.\") get vLLM to work with the current  ...",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "Sep 6, 2023",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.vllm.ai/en/stable/getting_started/installation/gpu",
+    "name": "GPU",
+    "snippet": "Silicon GPU: compute capability 7.5 or higher … this version is a MUST. NVIDIA Blackwell GPUs (B200, require a minimum of CUDA 12.8, vLLM's binaries are ...",
+    "host_name": "docs.vllm.ai",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.speediyo.com/ai-infra/vllm-gpu-compute-capability-matrix",
+    "name": "vLLM GPU Compatibility Matrix (Compute Capability 7.0-",
+    "snippet": "The vLLM execution engine requires compute platforms running an NVIDIA compute capability of 7.0 or higher. Turing ( sm_75 ) targets, Turing Emulation Layer ( sm_ ...",
+    "host_name": "www.speediyo.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://developer.nvidia.com/cuda/gpus",
+    "name": "CUDA GPU Compute Capability",
+    "snippet": "Compute capability defines the hardware features and supported instructions for each NVIDIA GPU architecture.",
+    "host_name": "developer.nvidia.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1qim0e9/vllm_v0140_released",
+    "name": "r/LocalLLaMA - vLLM v0.14.0 released",
+    "snippet": "Turing ( sm75 ) Turing ( sm75 ) (#29901, #31000) I believe that's the major upgrade for this release, similar GPUs for 32B-AWQ models. ...",
+    "host_name": "www.reddit.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.gmicloud.ai/ja/blog/vllm-gpu-compatibility-quantization",
+    "name": "vLLM GPU Support: Which GPUs Run Your Kernels",
+    "snippet": "vLLM runs on most NVIDIA GPUs , but the quantization kernels you need narrow the list fast. The three capabilities that decide vLLM performance.",
+    "host_name": "www.gmicloud.ai",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/issues/29743",
+    "name": "[Feature]: Turing support in Qwen3-VL backends #29743",
+    "snippet": "Nov 30, 2025 — According to the current Qwen3-VL dense implementation, there is no supported backend for Turing GPUs (SM75, e.g., T4 and T4G). vllm/vllm/ ... Read more",
+    "host_name": "github.com",
+    "rank": 6,
+    "date": "Nov 30, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.speediyo.com/ai-infra/vllm-v100-t4-sm70-sm75-fallback",
+    "name": "vLLM Legacy GPU Setup: Tuning V100 sm_70 & T4 sm_75",
+    "snippet": "Turing (T4) GPUs. This guide details how to build stable legacy compilation paths. vLLM requires Compute Capability 7.5 or higher . actual compute capability. ...",
+    "host_name": "www.speediyo.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.digitalocean.com/community/conceptual-articles/vllm-gpu-sizing-configuration-guide",
+    "name": "How to Choose the Right GPU for vLLM Inference",
+    "snippet": "Jan 11, 2026 — Size and configure GPUs for vLLM inference. Master memory requirements, KV cache, quantization, and tensor parallelism for LLM deployment.",
+    "host_name": "www.digitalocean.com",
+    "rank": 8,
+    "date": "Jan 11, 2026",
+    "favicon": ""
+  }
+]

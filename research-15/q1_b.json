@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-8B",
+    "name": "Qwen/Qwen3-8B",
+    "snippet": "May 14, 2025 — Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE)  ...",
+    "host_name": "huggingface.co",
+    "rank": 0,
+    "date": "May 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct/discussions/29",
+    "name": "Qwen/Qwen3-Coder-480B-A35B-Instruct · Can you provide",
+    "snippet": "Oct 30, 2025 — Hi. Can you provide your base models in BF16 format, instead of FP16 ? It seems that the BF (Brain Float) format is much better than the FP ...",
+    "host_name": "huggingface.co",
+    "rank": 1,
+    "date": "Oct 30, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1kajyj9/any_reason_why_qwen3_gguf_models_are_only_in_bf16",
+    "name": "Any reason why Qwen3 GGUF models are only in BF16?",
+    "snippet": "Converting BF16 to FP16 requires quantizing the exponent from 8 bits to 5 bits, while adding 3 useless fractional bits. It's the same size but ... Read more",
+    "host_name": "www.reddit.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-1.7B-Base",
+    "name": "Qwen/Qwen3-1.7B-Base",
+    "snippet": "May 14, 2025 — Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) ... Read more",
+    "host_name": "huggingface.co",
+    "rank": 3,
+    "date": "May 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B",
+    "name": "Qwen/Qwen3.6-35B-A3B",
+    "snippet": "Apr 22, 2026 — This repository contains model weights and configuration files for the post-trained model in the Hugging Face Transformers format.",
+    "host_name": "huggingface.co",
+    "rank": 4,
+    "date": "Apr 22, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Mungert/Qwen3-0.6B-GGUF",
+    "name": "Mungert/Qwen3-0.6B-GGUF",
+    "snippet": "Mar 2, 2026 — Slightly lower numerical precision than BF16 but generally sufficient for inference. Use F16 if: ✓ Your hardware supports FP16 but not BF16 . Read more",
+    "host_name": "huggingface.co",
+    "rank": 5,
+    "date": "Mar 2, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list",
+    "name": "Qwen3-Next-80B-A3B",
+    "snippet": "Sep 10, 2025 — This base model achieves performance comparable to (or even slightly better than) the dense Qwen3 -32B model , while using less than 10% of its ...",
+    "host_name": "qwen.ai",
+    "rank": 6,
+    "date": "Sep 10, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/collections/Qwen/qwen3",
+    "name": "Qwen3 - a Qwen Collection",
+    "snippet": "on a journey to advance and democratize artificial intelligence through open source and open science. Qwen3 updated Dec 30, 2025 . LX-bf16 Text Generation",
+    "host_name": "huggingface.co",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/ollama/ollama/issues/14155",
+    "name": "FP16/BF16 Qwen3-next-code on main Ollama repository",
+    "snippet": "Feb 8, 2026 — Hi, I kindly ask if you can upload qwen3 -coder-next: fp16 or qwen3 -coder-next: bf16 on the official repo. I would like to test the precision ...",
+    "host_name": "github.com",
+    "rank": 8,
+    "date": "Feb 8, 2026",
+    "favicon": ""
+  }
+]

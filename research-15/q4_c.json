@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://discuss.huggingface.co/t/why-am-i-out-of-gpu-memory-despite-using-device-map-auto/77933",
+    "name": "Why am I out of GPU memory despite using device_map=",
+    "snippet": "Mar 18, 2024 — using device_map =\" auto \" will split the large model into smaller chunks, store them in the CPU , and then put them sequentially into the GPU for ...",
+    "host_name": "discuss.huggingface.co",
+    "rank": 0,
+    "date": "Mar 18, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/docs/accelerate/en/usage_guides/quantization",
+    "name": "Model quantization",
+    "snippet": "You just need to pass a custom device_map in order to offload modules on cpu /disk. It will automatically load your model on your GPU. Please note that device_ ...",
+    "host_name": "huggingface.co",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/docs/accelerate/en/concept_guides/big_model_inference",
+    "name": "Loading big models into memory",
+    "snippet": "By passing device_map =\" auto \" , we tell Accelerate to determine automatically where to put each layer of the model. Accelerate handle the device map computation ...",
+    "host_name": "huggingface.co",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/huggingface/accelerate/issues/3566",
+    "name": "CPU Offloading for Quantized Models · Issue #3566",
+    "snippet": "May 13, 2025 — I was wondering whether it is possible to perform CPU offloading on quantized models . I'm running a pipeline that consists of several models ...",
+    "host_name": "github.com",
+    "rank": 3,
+    "date": "May 13, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://discuss.huggingface.co/t/big-model-inference-cpu-disk-offloading-for-transformers-using-from-pretrained/75165",
+    "name": "Big Model Inference: CPU/Disk Offloading for Transformers",
+    "snippet": "Feb 28, 2024 — Face's Accelerate Big Model Inference Guide. Just set device_map=\"auto\" in your call and it'll do this automatically. Offloading LLM models to  ...",
+    "host_name": "discuss.huggingface.co",
+    "rank": 4,
+    "date": "Feb 28, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://apxml.com/courses/quantized-llm-deployment/chapter-2-implementing-llm-quantization-toolkits/quantization-hf-transformers-accelerate",
+    "name": "LLM Quantization with Hugging Face Transformers",
+    "snippet": "We use device_map=\"auto \" . This tells Accelerate to figure out the best way to split the model layers across available GPUs and potentially offload some to the ... Read more",
+    "host_name": "apxml.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/docs/accelerate/en/usage_guides/big_modeling",
+    "name": "Big Model Inference",
+    "snippet": "Setting device_map=\"auto\" automatically fills all available space on the GPU(s ) first, then the CPU, and finally, the hard drive (the absolute slowest option)",
+    "host_name": "huggingface.co",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://discuss.huggingface.co/t/device-map-auto/49610",
+    "name": "Device_map=\"auto\" - Beginners",
+    "snippet": "Aug 5, 2023 — It loads a model onto multiple GPUs. Once loaded, the model can be run forward or backward. This only supports the inference of your model, not ...",
+    "host_name": "discuss.huggingface.co",
+    "rank": 7,
+    "date": "Aug 5, 2023",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.technolynx.com/post/hugging-face-accelerate-for-gpu-inference-what-it-does-and-when-to-use",
+    "name": "Hugging Face Accelerate for GPU Inference: What It Does",
+    "snippet": "Jul 11, 2026 — Hugging Face Accelerate handles device placement, offload, and mixed precision — not end-to-end inference latency. Here is what it actually ...",
+    "host_name": "www.technolynx.com",
+    "rank": 8,
+    "date": "Jul 11, 2026",
+    "favicon": ""
+  }
+]

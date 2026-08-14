@@ -1,0 +1,74 @@
+[
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1gp4g8a/hardware_requirements_to_run_qwen_25_32b",
+    "name": "hardware requirements to run qwen 2.5 32B? : r/LocalLLaMA",
+    "snippet": "what GPU (for PC) or mac config would be the minimum to run something like qwen 2.5 32B smoothly?",
+    "host_name": "www.reddit.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.spheron.network/blog/gpu-requirements-cheat-sheet-2026",
+    "name": "GPU Requirements Cheat Sheet 2026: VRAM + Cost, 18",
+    "snippet": "May 14, 2026 — approximate memory required for the model weights at the listed quantization level. 20-40% needs ~140 GB in FP16. Larger models (70B) fit on a ...",
+    "host_name": "www.spheron.network",
+    "rank": 1,
+    "date": "May 14, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://regolo.ai/autoround-quantization-gguf-guide",
+    "name": "AutoRound Quantization Guide: Local GPU to Production",
+    "snippet": "Jun 18, 2026 — 7B on single GPU . VRAM Minimum GPU 7B 14 GB 3.5 GB ~2 GB RTX 3060 ・ 470 GB ~120 GB ~60 GB ・ 4-bit needs ~0.5 bytes/param + KV cache overhead. ...",
+    "host_name": "regolo.ai",
+    "rank": 2,
+    "date": "Jun 18, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://apxml.com/models/qwen2-5-7b",
+    "name": "Qwen2.5-7B: Specifications and GPU VRAM Requirements",
+    "snippet": "Qwen2.5-7B. requirements for different quantization methods ・ 15.15 GB VRAM ・ 16GB VRAM Memory ・ maximum of 128K tokens.",
+    "host_name": "apxml.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://discuss.huggingface.co/t/llama-7b-gpu-memory-requirement/34323",
+    "name": "LLaMA 7B GPU Memory Requirement - 🤗Transformers",
+    "snippet": "Mar 21, 2023 — To run the 7B model in full precision, you need 7 * 4 = 28GB of GPU RAM. , for a 7B model you would need 8 bytes per parameter * 7 billion ...",
+    "host_name": "discuss.huggingface.co",
+    "rank": 4,
+    "date": "Mar 21, 2023",
+    "favicon": ""
+  },
+  {
+    "url": "https://jarvislabs.ai/ai-faqs/what-gpu-is-required-to-run-qwen-qwq-32b-model-from-hugging-face",
+    "name": "What GPU is required to run the Qwen/QwQ-32B model",
+    "snippet": "You'll need an A100 (80GB) for full precision, but can run it on consumer GPUs like RTX A5000 (24GB) with proper quantization . GPU Memory Requirements by ... Read more",
+    "host_name": "jarvislabs.ai",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.facebook.com/groups/vibecodinglife/posts/2071156116806248",
+    "name": "Which Qwen LLM version suits a 16GB VRAM GPU?",
+    "snippet": "This means you can comfortably run the 12B model on GPUs with more than 8GB of VRAM or the minimal 4B model on lower- end hardware . In layman's ... Read more",
+    "host_name": "www.facebook.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://medium.com/@marketing_novita.ai/qwen-2-5-7b-vram-tips-every-dev-should-know-932303373ff0",
+    "name": "Qwen 2.5 7B VRAM Tips Every Dev Should Know",
+    "snippet": "VRAM Capacity: Qwen-7B in full FP16 precision requires ~17 GB of VRAM . GPUs with <17 GB (e.g., 8GB or 12GB) need quantization (8-bit or 4-bit) ... Read more",
+    "host_name": "medium.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  }
+]

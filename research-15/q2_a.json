@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-1.7B",
+    "name": "Qwen/Qwen3-1.7B",
+    "snippet": "May 14, 2025 — Qwen3 is the latest generation of large language models in Qwen series, 1.84k Paper for Qwen/ Qwen3 -1.7B. Published May 14, 2025",
+    "host_name": "huggingface.co",
+    "rank": 0,
+    "date": "May 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF",
+    "name": "Qwen/Qwen3-1.7B-GGUF",
+    "snippet": "Dec 31, 2025 — We recommend setting presence_penalty to 1.5 for quantized models to suppress repetitive outputs. You can adjust the presence_penalty ... Read more",
+    "host_name": "huggingface.co",
+    "rank": 1,
+    "date": "Dec 31, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1kkrgyl/qwen_releases_official_quantized_models_of_qwen3",
+    "name": "Qwen releases official quantized models of Qwen3",
+    "snippet": "We're officially releasing the quantized models of Qwen3 today! Now you can deploy Qwen3 via Ollama, LM Studio, SGLang, and vLLM. Find all  ...",
+    "host_name": "www.reddit.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/lmstudio-community/Qwen3-1.7B-GGUF",
+    "name": "lmstudio-community/Qwen3-1.7B-GGUF",
+    "snippet": "Community Model> Qwen3 1.7B by Qwen. LM Studio Community models highlights program. Highlighting new & noteworthy models by the community. Read more",
+    "host_name": "huggingface.co",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org/html/2505.02214v1",
+    "name": "An Empirical Study of Qwen3 Quantization",
+    "snippet": "May 4, 2025 — With its initial release in 2023, Qwen demonstrated exceptional scalability, with even its 7B parameter model rivaling larger proprietary models ... Read more",
+    "host_name": "arxiv.org",
+    "rank": 4,
+    "date": "May 4, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/RedHatAI/Qwen3-1.7B-quantized.w4a16",
+    "name": "RedHatAI/Qwen3-1.7B-quantized.w4a16",
+    "snippet": "Oct 31, 2022 — Release Date: 05/05/2025. This model was obtained by quantizing the weights of Qwen3 -1.7B to INT4 data type. 323 • Published Oct 31, 2022 •",
+    "host_name": "huggingface.co",
+    "rank": 5,
+    "date": "Oct 31, 2022",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen-3.com/en/download",
+    "name": "Download Qwen-3 Models - MoE, Dense & Quantized Versions",
+    "snippet": "Download the Qwen-3 model series via Ollama, HuggingFace, or ModelScope, including MoE, Dense, and their quantized versions. Qwen3-1.7B Extra-Small Dense model",
+    "host_name": "qwen-3.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list",
+    "name": "Qwen3-Next-80B-A3B",
+    "snippet": "Sep 10, 2025 — -Next introduces several key improvements: a hybrid attention mechanism, We have already released Qwen3 -Next on Hugging Face and ModelScope.",
+    "host_name": "qwen.ai",
+    "rank": 7,
+    "date": "Sep 10, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/models?other=base_model:quantized:Qwen/Qwen3.5-4B",
+    "name": "Quantized Models for Qwen/Qwen3.5-4B",
+    "snippet": "Explore machine learning models .",
+    "host_name": "huggingface.co",
+    "rank": 8,
+    "date": "",
+    "favicon": ""
+  }
+]

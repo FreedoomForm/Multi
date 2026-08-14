@@ -1,0 +1,66 @@
+[
+  {
+    "name": "__init__.py",
+    "path": "mixllm/evaluation/__init__.py",
+    "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+    "size": 0,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm/evaluation/__init__.py?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/mixllm/evaluation/__init__.py",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/mixllm/evaluation/__init__.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm/evaluation/__init__.py?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/mixllm/evaluation/__init__.py"
+    }
+  },
+  {
+    "name": "engine.py",
+    "path": "mixllm/evaluation/engine.py",
+    "sha": "d392531dc34bc1ec90ec334a15fc55ac3b82363f",
+    "size": 3381,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm/evaluation/engine.py?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/mixllm/evaluation/engine.py",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/d392531dc34bc1ec90ec334a15fc55ac3b82363f",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/mixllm/evaluation/engine.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm/evaluation/engine.py?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/d392531dc34bc1ec90ec334a15fc55ac3b82363f",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/mixllm/evaluation/engine.py"
+    }
+  },
+  {
+    "name": "eval.py",
+    "path": "mixllm/evaluation/eval.py",
+    "sha": "dca22e5fbf3666713f739becb94852fe7c12672c",
+    "size": 11248,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm/evaluation/eval.py?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/mixllm/evaluation/eval.py",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/dca22e5fbf3666713f739becb94852fe7c12672c",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/mixllm/evaluation/eval.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm/evaluation/eval.py?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/dca22e5fbf3666713f739becb94852fe7c12672c",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/mixllm/evaluation/eval.py"
+    }
+  },
+  {
+    "name": "run.sh",
+    "path": "mixllm/evaluation/run.sh",
+    "sha": "553a79acac229d837018cc44aca4e92db58a615b",
+    "size": 371,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm/evaluation/run.sh?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/mixllm/evaluation/run.sh",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/553a79acac229d837018cc44aca4e92db58a615b",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/mixllm/evaluation/run.sh",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm/evaluation/run.sh?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/553a79acac229d837018cc44aca4e92db58a615b",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/mixllm/evaluation/run.sh"
+    }
+  }
+]

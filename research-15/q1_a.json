@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-1.7B",
+    "name": "Qwen/Qwen3-1.7B",
+    "snippet": "May 14, 2025 — Use this model Instructions to use Qwen/Qwen3-1.7B with libraries, inference providers, notebooks, and local apps. Follow these links to get ...",
+    "host_name": "huggingface.co",
+    "rank": 0,
+    "date": "May 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/mergekit-community/Qwen3-7B-Instruct",
+    "name": "mergekit-community/Qwen3-7B-Instruct",
+    "snippet": "Jun 2, 2023 — Use this model Instructions to use mergekit-community/Qwen3-7B-Instruct with libraries, inference providers, notebooks, and local apps. Follow ...",
+    "host_name": "huggingface.co",
+    "rank": 1,
+    "date": "Jun 2, 2023",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct",
+    "name": "Qwen/Qwen2.5-7B-Instruct",
+    "snippet": "This repo contains the instruction -tuned 7B Qwen2.5 model , Full 131,072 tokens detailed instructions on how to deploy Qwen2.5 for handling long texts.",
+    "host_name": "huggingface.co",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/collections/Qwen/qwen3",
+    "name": "Qwen3 - a Qwen Collection",
+    "snippet": "We&#39;re on a journey to advance and democratize artificial intelligence through open source and open science. Qwen3 updated Dec 30, 2025 … 7B • Updated Jul 7 ...",
+    "host_name": "huggingface.co",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507",
+    "name": "Qwen/Qwen3-4B-Instruct-2507",
+    "snippet": "May 14, 2025 — Use this model Instructions to use Qwen/ Qwen3 -4B- Instruct -2507 with libraries, inference providers, notebooks, and local apps. Follow these ...",
+    "host_name": "huggingface.co",
+    "rank": 4,
+    "date": "May 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/collections",
+    "name": "Qwen",
+    "snippet": "Qwen2.5 language models , including pretrained and instruction-tuned models of 7 sizes, including 0.5B, 1.5B, 3B, 7B, 14B, 32B, ... Read more",
+    "host_name": "huggingface.co",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF",
+    "name": "Qwen/Qwen3-1.7B-GGUF",
+    "snippet": "Dec 31, 2025 — Instructions to use Qwen/Qwen3-1.7B-GGUF with libraries, inference providers, notebooks, and local apps. Follow these links to get started. Read more",
+    "host_name": "huggingface.co",
+    "rank": 6,
+    "date": "Dec 31, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct",
+    "name": "Qwen/Qwen3-VL-8B-Instruct",
+    "snippet": "Meet Qwen3-VL — the most powerful vision-language model in the Qwen series to date. Available in Dense and MoE architectures. Instruct and reasoning‐enhanced ...",
+    "host_name": "huggingface.co",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list&ref=aiforradalom.poltextlab.com",
+    "name": "Qwen3-Next",
+    "snippet": "Sep 10, 2025 — All examples below are based on the Qwen3 -Next-80B-A3B- Instruct version. For the Thinking model , please refer to https:// huggingface .co/Qwen/ ... Read more",
+    "host_name": "qwen.ai",
+    "rank": 8,
+    "date": "Sep 10, 2025",
+    "favicon": ""
+  }
+]

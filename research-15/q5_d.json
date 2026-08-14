@@ -1,0 +1,56 @@
+[
+  {
+    "url": "https://github.com/vllm-project/vllm/releases",
+    "name": "Releases · vllm-project/vllm",
+    "snippet": "A high-throughput and memory-efficient inference and serving engine for LLMs. Qwen3 -VL M-RoPE (#49292). 411 commits from 212 contributors (61 new)! Model fixes ...",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.vllm.ai/projects/ascend/en/v0.13.0/user_guide/release_notes.html",
+    "name": "Release Notes — vllm-ascend",
+    "snippet": "Qwen3 -Next: [Experimental]Full support for Qwen3 -Next series including 80B ... It'll be supported in 2025 Q4 #4222. Audio required library is installed ... Read more",
+    "host_name": "docs.vllm.ai",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html",
+    "name": "Versioning Policy - vLLM Ascend",
+    "snippet": "Typically scheduled every three months, with careful alignment to the vLLM upstream release cycle and the Ascend software product roadmap.",
+    "host_name": "docs.vllm.ai",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://vllm.ai/blog/2025-09-11-qwen3-next",
+    "name": "vLLM Now Supports Qwen3-Next: Hybrid Architecture with",
+    "snippet": "Sep 11, 2025 — We're excited to announce that vLLM now supports Qwen3-Next , the latest generation of foundation models from the Qwen team. Read more",
+    "host_name": "vllm.ai",
+    "rank": 3,
+    "date": "Sep 11, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.readthedocs.io/en/latest/deployment/vllm.html",
+    "name": "vLLM - Qwen",
+    "snippet": "¶ vLLM supports parsing the thinking content. Since vLLM 0.9.0 , one can also use vllm serve ・ with the qwen3 reasoning parser. Qwen3 are block-wise quant, ...",
+    "host_name": "qwen.readthedocs.io",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://x.com/vllm_project/status/2084117362262049235",
+    "name": "vLLM will support Qwen3.8-Max's open-source as usual on",
+    "snippet": "vLLM (@vllm_project). 264 likes 10 replies. vLLM will support Qwen3.8-Max's open-source as usual on day-0 , stay tuned.",
+    "host_name": "x.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  }
+]

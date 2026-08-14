@@ -1,0 +1,290 @@
+[
+  {
+    "name": ".clang-format",
+    "path": ".clang-format",
+    "sha": "e06cf478f460bff08a0e42aa4a834a09f02e8685",
+    "size": 124,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/.clang-format?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/.clang-format",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/e06cf478f460bff08a0e42aa4a834a09f02e8685",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/.clang-format",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/.clang-format?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/e06cf478f460bff08a0e42aa4a834a09f02e8685",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/.clang-format"
+    }
+  },
+  {
+    "name": ".flake8",
+    "path": ".flake8",
+    "sha": "e694a9d33d0438c083cf009d7b9835fce95e80a2",
+    "size": 99,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/.flake8?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/.flake8",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/e694a9d33d0438c083cf009d7b9835fce95e80a2",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/.flake8",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/.flake8?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/e694a9d33d0438c083cf009d7b9835fce95e80a2",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/.flake8"
+    }
+  },
+  {
+    "name": ".gitignore",
+    "path": ".gitignore",
+    "sha": "b7faf403d915ca307532bb0eb9cceaf0214e8e5b",
+    "size": 4688,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/.gitignore?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/.gitignore",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/b7faf403d915ca307532bb0eb9cceaf0214e8e5b",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/.gitignore",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/.gitignore?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/b7faf403d915ca307532bb0eb9cceaf0214e8e5b",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/.gitignore"
+    }
+  },
+  {
+    "name": ".gitmodules",
+    "path": ".gitmodules",
+    "sha": "70f55c4da8a0674f487a5439959592fdc4c3a052",
+    "size": 241,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/.gitmodules?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/.gitmodules",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/70f55c4da8a0674f487a5439959592fdc4c3a052",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/.gitmodules",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/.gitmodules?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/70f55c4da8a0674f487a5439959592fdc4c3a052",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/.gitmodules"
+    }
+  },
+  {
+    "name": ".pre-commit-config.yaml",
+    "path": ".pre-commit-config.yaml",
+    "sha": "5beaf152fcc0c9351fa596f4afc0a6ecda3e27ea",
+    "size": 1452,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/.pre-commit-config.yaml?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/.pre-commit-config.yaml",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/5beaf152fcc0c9351fa596f4afc0a6ecda3e27ea",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/.pre-commit-config.yaml",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/.pre-commit-config.yaml?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/5beaf152fcc0c9351fa596f4afc0a6ecda3e27ea",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/.pre-commit-config.yaml"
+    }
+  },
+  {
+    "name": "CODE_OF_CONDUCT.md",
+    "path": "CODE_OF_CONDUCT.md",
+    "sha": "c803f59370d1bd427d817af544380321df93d1d6",
+    "size": 245,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/CODE_OF_CONDUCT.md?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/CODE_OF_CONDUCT.md",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/c803f59370d1bd427d817af544380321df93d1d6",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/CODE_OF_CONDUCT.md",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/CODE_OF_CONDUCT.md?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/c803f59370d1bd427d817af544380321df93d1d6",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/CODE_OF_CONDUCT.md"
+    }
+  },
+  {
+    "name": "CONTRIBUTING.md",
+    "path": "CONTRIBUTING.md",
+    "sha": "c282e9a1adacca696a4fcb7396cb6f872710fefd",
+    "size": 920,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/CONTRIBUTING.md?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/CONTRIBUTING.md",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/c282e9a1adacca696a4fcb7396cb6f872710fefd",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/CONTRIBUTING.md",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/CONTRIBUTING.md?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/c282e9a1adacca696a4fcb7396cb6f872710fefd",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/CONTRIBUTING.md"
+    }
+  },
+  {
+    "name": "Dockerfile",
+    "path": "Dockerfile",
+    "sha": "d15c46db6429fa939093a5e2aa0eeb95a4e0b812",
+    "size": 434,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/Dockerfile?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/Dockerfile",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/d15c46db6429fa939093a5e2aa0eeb95a4e0b812",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/Dockerfile",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/Dockerfile?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/d15c46db6429fa939093a5e2aa0eeb95a4e0b812",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/Dockerfile"
+    }
+  },
+  {
+    "name": "LICENSE",
+    "path": "LICENSE",
+    "sha": "383499d6ae1f5f994fb086d41158d2f9866da33f",
+    "size": 1085,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/LICENSE?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/LICENSE",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/383499d6ae1f5f994fb086d41158d2f9866da33f",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/LICENSE",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/LICENSE?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/383499d6ae1f5f994fb086d41158d2f9866da33f",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/LICENSE"
+    }
+  },
+  {
+    "name": "README.md",
+    "path": "README.md",
+    "sha": "2b9258375cf0fb9d04d8735414f95173111b2ac0",
+    "size": 5513,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/README.md?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/README.md",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/2b9258375cf0fb9d04d8735414f95173111b2ac0",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/README.md",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/README.md?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/2b9258375cf0fb9d04d8735414f95173111b2ac0",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/README.md"
+    }
+  },
+  {
+    "name": "SECURITY.md",
+    "path": "SECURITY.md",
+    "sha": "e751608fcd55622cc1f88f30833bffe3e0aed236",
+    "size": 542,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/SECURITY.md?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/SECURITY.md",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/e751608fcd55622cc1f88f30833bffe3e0aed236",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/SECURITY.md",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/SECURITY.md?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/e751608fcd55622cc1f88f30833bffe3e0aed236",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/SECURITY.md"
+    }
+  },
+  {
+    "name": "THIRD_PARTY_NOTICES.md",
+    "path": "THIRD_PARTY_NOTICES.md",
+    "sha": "9a50285119fb462a76d3397b53e5a7eb6229c55a",
+    "size": 676,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/THIRD_PARTY_NOTICES.md?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/THIRD_PARTY_NOTICES.md",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/9a50285119fb462a76d3397b53e5a7eb6229c55a",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/THIRD_PARTY_NOTICES.md",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/THIRD_PARTY_NOTICES.md?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/9a50285119fb462a76d3397b53e5a7eb6229c55a",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/THIRD_PARTY_NOTICES.md"
+    }
+  },
+  {
+    "name": "apply_vllm_patche.sh",
+    "path": "apply_vllm_patche.sh",
+    "sha": "cbf91f1648f43094b0dbdc2d0965bf0e3d6811e6",
+    "size": 285,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/apply_vllm_patche.sh?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/apply_vllm_patche.sh",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/cbf91f1648f43094b0dbdc2d0965bf0e3d6811e6",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/apply_vllm_patche.sh",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/apply_vllm_patche.sh?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/cbf91f1648f43094b0dbdc2d0965bf0e3d6811e6",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/apply_vllm_patche.sh"
+    }
+  },
+  {
+    "name": "mixllm",
+    "path": "mixllm",
+    "sha": "5cf2a83e32bc90a8a87f05ed6c7ea2fef7b3f314",
+    "size": 0,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/tree/main/mixllm",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/trees/5cf2a83e32bc90a8a87f05ed6c7ea2fef7b3f314",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/mixllm?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/trees/5cf2a83e32bc90a8a87f05ed6c7ea2fef7b3f314",
+      "html": "https://github.com/microsoft/MixLLM/tree/main/mixllm"
+    }
+  },
+  {
+    "name": "requirements.txt",
+    "path": "requirements.txt",
+    "sha": "620363c5d899b0c6cd4d2fee2df28dce73ef8674",
+    "size": 72,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/requirements.txt?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/requirements.txt",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/620363c5d899b0c6cd4d2fee2df28dce73ef8674",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/requirements.txt",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/requirements.txt?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/620363c5d899b0c6cd4d2fee2df28dce73ef8674",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/requirements.txt"
+    }
+  },
+  {
+    "name": "setup.py",
+    "path": "setup.py",
+    "sha": "a098c7a1975fb9a06f9409ed014fef9fb1fa1d8c",
+    "size": 2461,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/setup.py?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/blob/main/setup.py",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/a098c7a1975fb9a06f9409ed014fef9fb1fa1d8c",
+    "download_url": "https://raw.githubusercontent.com/microsoft/MixLLM/main/setup.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/setup.py?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/blobs/a098c7a1975fb9a06f9409ed014fef9fb1fa1d8c",
+      "html": "https://github.com/microsoft/MixLLM/blob/main/setup.py"
+    }
+  },
+  {
+    "name": "vllm",
+    "path": "vllm",
+    "sha": "5fbbfe9a4c13094ad72ed3d6b4ef208a7ddc0fd7",
+    "size": 0,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/vllm?ref=main",
+    "html_url": "https://github.com/vllm-project/vllm/tree/5fbbfe9a4c13094ad72ed3d6b4ef208a7ddc0fd7",
+    "git_url": "https://api.github.com/repos/vllm-project/vllm/git/trees/5fbbfe9a4c13094ad72ed3d6b4ef208a7ddc0fd7",
+    "download_url": null,
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/vllm?ref=main",
+      "git": "https://api.github.com/repos/vllm-project/vllm/git/trees/5fbbfe9a4c13094ad72ed3d6b4ef208a7ddc0fd7",
+      "html": "https://github.com/vllm-project/vllm/tree/5fbbfe9a4c13094ad72ed3d6b4ef208a7ddc0fd7"
+    }
+  },
+  {
+    "name": "vllm_v0.9.0_patch",
+    "path": "vllm_v0.9.0_patch",
+    "sha": "2a13c960b61089dcb5afb3921f706096f3443e1b",
+    "size": 0,
+    "url": "https://api.github.com/repos/microsoft/MixLLM/contents/vllm_v0.9.0_patch?ref=main",
+    "html_url": "https://github.com/microsoft/MixLLM/tree/main/vllm_v0.9.0_patch",
+    "git_url": "https://api.github.com/repos/microsoft/MixLLM/git/trees/2a13c960b61089dcb5afb3921f706096f3443e1b",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/microsoft/MixLLM/contents/vllm_v0.9.0_patch?ref=main",
+      "git": "https://api.github.com/repos/microsoft/MixLLM/git/trees/2a13c960b61089dcb5afb3921f706096f3443e1b",
+      "html": "https://github.com/microsoft/MixLLM/tree/main/vllm_v0.9.0_patch"
+    }
+  }
+]

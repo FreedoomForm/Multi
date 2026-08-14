@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://medium.com/data-science-at-microsoft/a-practical-guide-to-int4-quantization-for-slms-gptq-vs-awq-olive-and-real-world-results-2f63d6963d1d",
+    "name": "A practical guide to INT4 quantization for SLMs: GPTQ vs",
+    "snippet": "GPTQ can compress a 175-billion-parameter model to 4-bit weights in just a few GPU hours , all while preserving virtually the same accuracy",
+    "host_name": "medium.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://pub.towardsai.net/gptq-quantization-on-a-llama-2-7b-fine-tuned-model-with-huggingface-a7b291fbb871",
+    "name": "GPTQ Quantization on a Llama 2 7B Fine-Tuned Model",
+    "snippet": "Sep 7, 2023 — It takes about 45 minutes to quantize the model, less than $1 in Colab. and consumes a peak of 32 GB of GPU VRAM. Both inference processes were ...",
+    "host_name": "pub.towardsai.net",
+    "rank": 1,
+    "date": "Sep 7, 2023",
+    "favicon": ""
+  },
+  {
+    "url": "https://waylandz.com/llm-transformer-book-en/chapter-27-quantization",
+    "name": "Chapter 27: Model Quantization - GPTQ, AWQ, and GGUF",
+    "snippet": "Quantization itself takes hours and requires GPU Needs calibration data (128-512 samples) CPU support is weak; not practical for local-CPU inference",
+    "host_name": "waylandz.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/162meng/getting_bad_results_with_gptqquantized_models_is",
+    "name": "Getting bad results with GPTQ-quantized models. Is it worth",
+    "snippet": "Hey there,\n\nWith the recent CodeLLaMA releases, I was excited to finally find a \"daily driver\" use case with local models... Until I found out ...",
+    "host_name": "www.reddit.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.lmsys.org/blog/2025-11-13-AutoRound",
+    "name": "🚀 AutoRound Meets SGLang: Enabling Quantized Model",
+    "snippet": "Nov 14, 2025 — AutoRound remains fast and lightweight— quantizing a 72B model takes only 37 minutes on a single GPU under light mode. It further supports. GPTQ ...",
+    "host_name": "www.lmsys.org",
+    "rank": 4,
+    "date": "Nov 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://kaitchup.substack.com/p/mistral-7b-recipes-for-fine-tuning",
+    "name": "Mistral 7B 4-bit VRAM usage (Q4/NF4): QLoRA fine-tuning",
+    "snippet": "training for one epoch would take more than 200 hours using a T4 GPU . If you use a V100 reduce it to 100 hours . It should take around two days ...",
+    "host_name": "kaitchup.substack.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.facebook.com/groups/mlban/posts/2064815867357849",
+    "name": "Is llama3.1 8B model slow in Google Colab with T4 GPU?",
+    "snippet": "I was running llama3.1 8B model 4bit quantized in colab t4 gpu. It was taking 2 3 minutes to give result. Very slow. Did someone tried llama in colab? ...",
+    "host_name": "www.facebook.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.philschmid.de/gptq-llama",
+    "name": "Optimize open LLMs using GPTQ and Hugging Face",
+    "snippet": "Aug 31, 2023 — For this example the quantization on a single A10G GPU for a 7B model took ~45minutes. Python. import os import json # quantize the model ... Read more",
+    "host_name": "www.philschmid.de",
+    "rank": 7,
+    "date": "Aug 31, 2023",
+    "favicon": ""
+  },
+  {
+    "url": "https://lightning.ai/cosmo3769/studios/post-training-quantization-to-gptq-format-and-evaluation",
+    "name": "Post-Training Quantization to GPTQ format and Evaluation",
+    "snippet": "Mar 25, 2024 — It can quantize GPT model with 175 billion parameter in about 4 GPU hours and makes it possible to run inference on this large model using a ... Read more",
+    "host_name": "lightning.ai",
+    "rank": 8,
+    "date": "Mar 25, 2024",
+    "favicon": ""
+  }
+]

@@ -1,0 +1,74 @@
+[
+  {
+    "url": "https://arxiv.org/html/2505.02214v1",
+    "name": "An Empirical Study of Qwen3 Quantization",
+    "snippet": "May 4, 2025 — This study aims to: (1) benchmark quantization-induced performance trade-offs, (2) identify optimal methods for specific bit-widths, and (3) ... Read more",
+    "host_name": "arxiv.org",
+    "rank": 0,
+    "date": "May 4, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://deepgram.com/learn/hellaswag-llm-benchmark-guide",
+    "name": "HellaSwag: Understanding the LLM Benchmark for",
+    "snippet": "HellaSwag is the large language model benchmark for commonsense reasoning. Here's your guide to this widely-used LLM metric.",
+    "host_name": "deepgram.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/MachineLearning/comments/zff5mh/36_of_hellaswag_benchmark_contains_errors_d",
+    "name": "36% of HellaSwag benchmark contains errors [D]",
+    "snippet": "I analyzed HellaSwag and found 36% contains errors. For example, here's a prompt and set of possible completions from the dataset. the average  ...",
+    "host_name": "www.reddit.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://deepeval.com/docs/benchmarks-hellaswag",
+    "name": "HellaSwag | DeepEval - The LLM Evaluation Framework",
+    "snippet": "HellaSwag is a benchmark designed to evaluate language models' commonsense reasoning through sentence completion tasks. It provides 10,000 challenges spanning ...",
+    "host_name": "deepeval.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/ggml-org/llama.cpp/discussions/2321",
+    "name": "HellaSwag scores using the perplexity tool #2321",
+    "snippet": "The resulting accuracy score is the percent of groups with correct predictions. Random accuracy 25.00 Human accuracy > 95.00. HellaSwag score is 100 * n/N .  ...",
+    "host_name": "github.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.emergentmind.com/topics/hellaswag-benchmark",
+    "name": "HellaSwag Benchmark",
+    "snippet": "Oct 19, 2025 — HellaSwag is a benchmark designed to probe commonsense natural language inference (NLI) and to rigorously evaluate the ability of neural models ... Read more",
+    "host_name": "www.emergentmind.com",
+    "rank": 5,
+    "date": "Oct 19, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.confident-ai.com/blog/llm-benchmarks-mmlu-hellaswag-and-beyond",
+    "name": "Top LLM Benchmarks Explained: MMLU, HellaSwag, BBH,",
+    "snippet": "Aug 8, 2025 — LLM benchmarks such as MMLU, HellaSwag , and DROP, are a set of standardized tests designed to evaluate the performance of LLMs on various ...",
+    "host_name": "www.confident-ai.com",
+    "rank": 6,
+    "date": "Aug 8, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://evalscope.readthedocs.io/en/latest/benchmarks/hellaswag.html",
+    "name": "HellaSwag | EvalScope - Read the Docs",
+    "snippet": "HellaSwag is a benchmark for evaluating commonsense natural language inference , specifically testing a model's ability to complete sentences describing everyday ... Read more",
+    "host_name": "evalscope.readthedocs.io",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  }
+]

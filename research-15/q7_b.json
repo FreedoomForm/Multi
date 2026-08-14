@@ -1,0 +1,74 @@
+[
+  {
+    "url": "https://github.com/intel/auto-round",
+    "name": "intel/auto-round: A SOTA quantization algorithm for high-",
+    "snippet": "AutoRound is an advanced quantization toolkit. Quantize 7B models in about 10 minutes on a single GPU. Number of tuning iterations (default is 200 ).",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://pypi.org/project/auto-round/0.4",
+    "name": "auto-round",
+    "snippet": "Nov 22, 2024 — AutoRound is an advanced quantization algorithm for low-bits LLM inference. fine-tune rounding values and minmax values of weights in just 200 ...",
+    "host_name": "pypi.org",
+    "rank": 1,
+    "date": "Nov 22, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/blog/autoround",
+    "name": "Introducing AutoRound: Intel's Advanced Quantization for",
+    "snippet": "Apr 29, 2025 — AutoRound is fast and lightweight — quantizing a 72B model takes just 37 minutes on an A100 GPU under light mode. Round delivers like Qwen, ...",
+    "host_name": "huggingface.co",
+    "rank": 2,
+    "date": "Apr 29, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://regolo.ai/autoround-quantization-gguf-guide",
+    "name": "AutoRound Quantization Guide: Local GPU to Production",
+    "snippet": "Jun 18, 2026 — AutoRound uses sign-gradient descent to fine-tune weight rounding and min -max ranges in ~ 200 iterations. INT2 models retaining 97.9% accuracy … ...",
+    "host_name": "regolo.ai",
+    "rank": 3,
+    "date": "Jun 18, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://medium.com/@bnjmn_marie/new-qwen2-5-models-quantized-to-4-bit-b276aa2ad9f6",
+    "name": "New Qwen2.5 Models Quantized to 4-bit | by Benjamin Marie",
+    "snippet": "AutoRound significantly outperforms Bitsandbytes quantization in most cases, with the exception of the Qwen2 . 5 7B model on benchmarks like Arc ...",
+    "host_name": "medium.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.lmsys.org/blog/2025-11-13-AutoRound",
+    "name": "🚀 AutoRound Meets SGLang: Enabling Quantized Model",
+    "snippet": "Nov 14, 2025 — AutoRound remains fast and lightweight—quantizing a 72B model takes only 37 minutes on a single GPU under light mode. It further supports mixed ...",
+    "host_name": "www.lmsys.org",
+    "rank": 5,
+    "date": "Nov 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://community.intel.com/t5/Blogs/Tech-Innovation/Artificial-Intelligence-AI/AutoRound-Meets-SGLang-Enabling-Quantized-Model-Inference-with/post/1727196",
+    "name": "AutoRound Meets SGLang: Enabling Quantized Model",
+    "snippet": "Nov 20, 2025 — AutoRound remains fast and lightweight—quantizing a 72B model takes only 37 minutes on a single GPU under light mode. It further supports mixed ...",
+    "host_name": "community.intel.com",
+    "rank": 6,
+    "date": "Nov 20, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.readthedocs.io/en/v2.5/benchmark/speed_benchmark.html",
+    "name": "Qwen2.5 Speed Benchmark - Qwen - Read the Docs",
+    "snippet": "This section reports the speed performance of bf16 models, quantized models (including GPTQ-Int4, GPTQ-Int8 and AWQ) of the Qwen2 . 5 series.",
+    "host_name": "qwen.readthedocs.io",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  }
+]

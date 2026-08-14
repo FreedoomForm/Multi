@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://qwen.readthedocs.io/en/stable/quantization/gptq.html",
+    "name": "GPTQ",
+    "snippet": "GPTQ is a quantization method for GPT-like LLMs, which uses one-shot weight quantization based on approximate second-order information.",
+    "host_name": "qwen.readthedocs.io",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1kkrgyl/qwen_releases_official_quantized_models_of_qwen3",
+    "name": "Qwen releases official quantized models of Qwen3",
+    "snippet": "We're officially releasing the quantized models of Qwen3 today! choose from multiple formats including GGUF, AWQ, and GPTQ for easy local ...",
+    "host_name": "www.reddit.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://huggingface.co/collections/Qwen/qwen3",
+    "name": "Qwen3 - a Qwen Collection",
+    "snippet": "Qwen/Qwen3-4B-AWQ. Text Generation • 4B • Updated May 20, 2025 • 411k • 32 · Qwen/Qwen3-1.7B-GPTQ-Int8. Text Generation • 2B • Updated May 20, 2025 • 3.12k • 7 ...",
+    "host_name": "huggingface.co",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org/html/2505.02214v1",
+    "name": "An Empirical Study of Qwen3 Quantization",
+    "snippet": "We evaluate low-bit quantization across Qwen3's post-training models (0.6B, 1.8B, 4B, 7B, 14B, and 72B) as well as their pretraining versions",
+    "host_name": "arxiv.org",
+    "rank": 3,
+    "date": "May 4, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://kaitchup.substack.com/p/qwen35-quantization-similar-accuracy",
+    "name": "Qwen3.5 Quantization: Similar Accuracy, More Thinking",
+    "snippet": "Qwen3.5 offers an excellent family of models across a wide range of sizes, from 0.8B to 397B parameters. GPTQ INT4 models: : Two variants that ...",
+    "host_name": "kaitchup.substack.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://modelscope.cn/models/JunHowie/Qwen3-1.7B-GPTQ-Int4",
+    "name": "Qwen3-1.7B-GPTQ-Int4",
+    "snippet": "This model is quantized to 4-bit with a group size of 128. Compared to earlier quantized versions, the new quantized model demonstrates better tokens/s ...",
+    "host_name": "modelscope.cn",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.youtube.com/watch?v=gNjBaqsnycQ",
+    "name": "Qwen3 Official Quants Released - Best Quantized Models Ever",
+    "snippet": "Alibaba has just released the official quants of their celebrated Quent3 models so you can now deploy Quen 3 in contest format via Olama.",
+    "host_name": "www.youtube.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://tomodahinata.com/en/blog/qwen3-quantization-awq-gptq-fp8-gguf-comparison-guide",
+    "name": "deciding AWQ, GPTQ, FP8, and GGUF by use - 友田 陽大",
+    "snippet": "GPTQ is one-shot weight quantization using approximate second-order information, with Int4/Int8 common. In vLLM it's accelerated with the ...",
+    "host_name": "tomodahinata.com",
+    "rank": 7,
+    "date": "Jun 25, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.aimodels.fyi/models/compare/qwen3.5-35b-a3b-awq-4bit-cyankiwi-vs-qwen3.5-35b-a3b-gptq-int4-qwen",
+    "name": "Qwen3.5-35B-A3B-AWQ-4bit - vs",
+    "snippet": "Qwen3.5-35B-A3B-GPTQ-Int4 is a 35-billion parameter quantized language model with vision capabilities, maintained by Qwen. This model uses a ...",
+    "host_name": "www.aimodels.fyi",
+    "rank": 8,
+    "date": "Jun 25, 2026",
+    "favicon": ""
+  }
+]

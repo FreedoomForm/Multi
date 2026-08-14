@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://www.reddit.com/r/LocalLLaMA/comments/1uo32yw/qwen_36_27b_vllm_performance_benchmark_results",
+    "name": "VLLM Performance Benchmark Results (BF16, FP8, NVFP4)",
+    "snippet": "NVFP4 dominates token generation speed (~2.6x faster than BF16): compressing weights to 4 - bit dramatically slashes PCIe/VRAM data transfers, ...",
+    "host_name": "www.reddit.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://saumilya.medium.com/i-ran-133-benchmarks-to-find-out-if-vllm-is-actually-faster-than-huggingface-b75f4fb6b3bd",
+    "name": "I ran 133 benchmarks to find out if vLLM is actually faster than",
+    "snippet": "vLLM and HF both sit in the 11–14 tokens / second range for these 4 - bit models on a V100. The best single configuration observed was vLLM + Qwen ...",
+    "host_name": "saumilya.medium.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://discuss.vllm.ai/t/speeding-up-vllm-inference-for-qwen2-5-vl/615",
+    "name": "Speeding up vllm inference for Qwen2.5-VL - General",
+    "snippet": "May 14, 2025 — The Qwen /Qwen2.5-VL- 7B -Instruct-AWQ model uses AWQ 4 - bit quantization, which is supported by vLLM for efficient inference .",
+    "host_name": "discuss.vllm.ai",
+    "rank": 2,
+    "date": "May 14, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://qwen.readthedocs.io/en/v2.0/benchmark/speed_benchmark.html",
+    "name": "Speed Benchmark - Qwen",
+    "snippet": "This section reports the speed performance of bf16 models, we report the inference speed ( tokens /s) 7B ( vLLM ) Model",
+    "host_name": "qwen.readthedocs.io",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.linkedin.com/posts/joelniklaus_last-week-i-ran-some-inference-speed-benchmarking-activity-7374091031794851841-QzgM",
+    "name": "Joel Niklaus - Inference Speed Benchmarking with vLLM",
+    "snippet": "The speedup for the 27B model is remarkable: from 310 (TP1) to 670 (TP2) to 700 (TP4) output tokens /s. With 16K input and 4K output tokens , the ... Read more",
+    "host_name": "www.linkedin.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/issues/24728",
+    "name": "Multi-Modal Benchmark on NVIDIA A100 – Qwen2.5-VL /",
+    "snippet": "Sep 11, 2025 — I have conducted a comprehensive benchmark of four popular multi-modal models using the vllm bench toolkit. The goal was to evaluate and compare ... Read more",
+    "host_name": "github.com",
+    "rank": 5,
+    "date": "Sep 11, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://kaitchup.substack.com/p/qwen35-27b-latency-and-throughput",
+    "name": "Qwen3.5 27B Latency and Throughput: INT4 vs NVFP4 vs",
+    "snippet": "On most benchmarks , quantized Qwen3.5 models perform very close to the original models. That is true across several common formats, ... Read more",
+    "host_name": "kaitchup.substack.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://forums.developer.nvidia.com/t/from-20-to-35-tps-on-qwen3-next-nvfp4-w-flashinfer-12-1f/356153",
+    "name": "From 20 to 35 TPS on Qwen3-Next-NVFP4 w/ FlashInfer",
+    "snippet": "Dec 30, 2025 — It ran at a very usable 20 tokens / second . I was able to nearly double the performance to 35 tokens / second . 4 - bit quants should be almost 2x ...",
+    "host_name": "forums.developer.nvidia.com",
+    "rank": 7,
+    "date": "Dec 30, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org/html/2410.04466v3",
+    "name": "Large Language Model Inference Acceleration",
+    "snippet": "Jan 23, 2025 — For Llama2- 7B with 4 - bit quantization, T-MAC achieves 10 tokens /s with a single core and 38 tokens /s with eight cores on Apple M2-Ultra ... Read more",
+    "host_name": "arxiv.org",
+    "rank": 8,
+    "date": "Jan 23, 2025",
+    "favicon": ""
+  }
+]
