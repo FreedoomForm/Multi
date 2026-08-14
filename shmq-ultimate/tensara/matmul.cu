@@ -1,30 +1,30 @@
 /*
- * Tensara — Matrix Multiplication
- * ===============================
+ * Tensara — Matrix Multiplication  (MEDIUM)
+ * =========================================
  *
- * Solution: C = A × B where A is M×K, B is K×N, C is M×N (all row-major, FP32).
+ *   Compute C = A × B  where A is M×K, B is K×N, C is M×N (FP32, row-major).
  *
- * Technique: Tiled GEMM with shared memory, directly adapted from the SHMQ
- * kernel's Phase-1 (W8A8) matmul loop. The only differences vs the SHMQ kernel:
- *   - FP32 inputs/outputs instead of INT8/FP16
- *   - No per-group weight scale (weights are already FP32)
- *   - No INT4 path (single bit-width)
+ *   This is the standalone analog of the SHMQ kernel's Phase-1 (W8A8) matmul
+ *   loop with FP32 inputs/outputs. The SHMQ kernel adds per-group weight
+ *   scales and an INT4 second phase; here we demonstrate the unquantized
+ *   baseline.
  *
- * Test sizes (per Tensara spec):
- *   4096×4096 × 4096×4096
- *   8192×8192 × 8192×4096
- *   4096×4096 × 4096×8192
- *   8192×8192 × 8192×8192
+ * Strategy:
+ *   - Tiled GEMM with shared memory
+ *   - 64×64 output tile per block, 8×8 sub-tile per thread, 64 threads/block
+ *   - BLOCK_K=32 reduction loop (matches SHMQ Phase-1 K-step)
+ *   - +1 padding on shared memory rows to avoid bank conflicts
  *
- * Each block computes a 64×64 output tile using 8×8 sub-tiles per thread
- * (64 threads per block = 8×8 thread grid). Accumulates in FP32 registers.
+ * Note: For maximum performance on T4/A100/H100, the production SHMQ
+ *   kernel uses mma.sync.aligned PTX (tensor cores). This standalone version
+ *   uses scalar FP32 FMA instructions for portability across all GPUs
+ *   (including non-tensor-core targets like T4 in FP32 mode).
  *
- * Target GPUs (Tensara): Tesla T4 (sm_75), A100 (sm_80), H100 (sm_90).
- * This kernel uses no architecture-specific intrinsics, so it compiles on all.
+ * Test sizes: 4096³ / 8192×8192×4096 / 4096×4096×8192 / 8192³
+ * Targets: T4 (sm_75), A100 (sm_80), H100 (sm_90), B200 (sm_100).
  *
  * Signature:
- *   solution(const float* input_a, const float* input_b,
- *            float* output_c, size_t m, size_t n, size_t k)
+ *   solution(input_a, input_b, output_c, m, n, k)
  */
 #include <cuda_runtime.h>
 
@@ -35,9 +35,9 @@
 #define THREAD_Y 8
 
 __global__ void matmul_kernel(
-    const float* __restrict__ A,   // M x K, row-major
-    const float* __restrict__ B,   // K x N, row-major
-    float*       __restrict__ C,   // M x N, row-major
+    const float* __restrict__ A,   // M × K, row-major
+    const float* __restrict__ B,   // K × N, row-major
+    float*       __restrict__ C,   // M × N, row-major
     int M, int N, int K)
 {
     int row_block = blockIdx.y * BLOCK_M;
@@ -45,7 +45,6 @@ __global__ void matmul_kernel(
     int tx = threadIdx.x;
     int ty = threadIdx.y;
 
-    // Each thread accumulates an 8x8 sub-tile
     float acc[8][8];
     #pragma unroll
     for (int i = 0; i < 8; ++i)
@@ -53,7 +52,7 @@ __global__ void matmul_kernel(
         for (int j = 0; j < 8; ++j)
             acc[i][j] = 0.0f;
 
-    __shared__ float smem_A[BLOCK_M][BLOCK_K + 1];  // +1 to avoid bank conflicts
+    __shared__ float smem_A[BLOCK_M][BLOCK_K + 1];   // +1 to avoid bank conflicts
     __shared__ float smem_B[BLOCK_K][BLOCK_N + 1];
 
     int n_k_tiles = (K + BLOCK_K - 1) / BLOCK_K;
@@ -61,7 +60,7 @@ __global__ void matmul_kernel(
     for (int kt = 0; kt < n_k_tiles; ++kt) {
         int k_base = kt * BLOCK_K;
 
-        // Load A tile (BLOCK_M x BLOCK_K) — cooperative load by all 64 threads
+        // Load A tile (BLOCK_M × BLOCK_K) — 64 threads cooperative load
         #pragma unroll
         for (int i = 0; i < BLOCK_M; i += THREAD_Y) {
             #pragma unroll
@@ -76,7 +75,7 @@ __global__ void matmul_kernel(
             }
         }
 
-        // Load B tile (BLOCK_K x BLOCK_N)
+        // Load B tile (BLOCK_K × BLOCK_N)
         #pragma unroll
         for (int i = 0; i < BLOCK_K; i += THREAD_Y) {
             #pragma unroll
@@ -92,7 +91,7 @@ __global__ void matmul_kernel(
         }
         __syncthreads();
 
-        // Per-thread GEMM (8x8 output per thread, BLOCK_K reduction)
+        // Per-thread GEMM (8×8 output per thread, BLOCK_K reduction)
         #pragma unroll
         for (int kk = 0; kk < BLOCK_K; ++kk) {
             float a_vals[8];
@@ -134,5 +133,5 @@ extern "C" void solution(const float* input_a, const float* input_b,
     dim3 block(THREAD_X, THREAD_Y, 1);
     dim3 grid((n + BLOCK_N - 1) / BLOCK_N, (m + BLOCK_M - 1) / BLOCK_M, 1);
     matmul_kernel<<<grid, block>>>(input_a, input_b, output_c,
-                                    (int)m, (int)n, (int)k);
+                                     (int)m, (int)n, (int)k);
 }
