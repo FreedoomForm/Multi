@@ -1,0 +1,67 @@
+{
+  "config": {
+    "target_hp_ratio": 0.2,
+    "base_hp_ratio": 0.125,
+    "bit_levels": [
+      4,
+      8
+    ],
+    "group_size": 128,
+    "weight_symmetric": true,
+    "activation_symmetric": true,
+    "activation_bits": 8,
+    "inter_layer_hessian": "fisher",
+    "dampening": 0.1,
+    "use_mean_diag_dampening": true,
+    "calibration_dataset": "wikitext2",
+    "n_samples": 4,
+    "sequence_length": 128,
+    "batch_size": 1,
+    "smooth_alpha": 0.5,
+    "smooth_scale_min": 1e-05,
+    "enable_autoround": true,
+    "autoround_iters": 10,
+    "autoround_lr": 0.1,
+    "autoround_lr_schedule": "linear",
+    "autoround_block_size": 128,
+    "enable_sqc": true,
+    "sqc_zscore_threshold": 2.0,
+    "sqc_scale_range": [
+      0.9,
+      1.1
+    ],
+    "sqc_scale_search_points": 50,
+    "sqc_salience_lambda": 1.0,
+    "gptq_block_size": 128,
+    "gptq_percdamp": 0.01,
+    "gptq_actorder": false,
+    "parallel_groups": {
+      "attention": [
+        "q_proj",
+        "k_proj",
+        "v_proj"
+      ],
+      "ffn": [
+        "up_proj",
+        "gate_proj"
+      ]
+    },
+    "excluded_layer_keywords": [
+      "embed_tokens",
+      "lm_head",
+      "norm",
+      "layernorm",
+      "rmsnorm"
+    ],
+    "permutation_metric": "act_weight_linf",
+    "permutation_sort_by_magnitude": true,
+    "ilp_solver": "CBC",
+    "ilp_time_limit": 30,
+    "model_name": "gpt2",
+    "device": "cpu",
+    "dtype": "float32",
+    "use_flash_attention": false
+  },
+  "bit_allocation": {},
+  "sqc_multipliers": {}
+}

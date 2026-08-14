@@ -1,0 +1,610 @@
+     1→{
+     2→ "cells": [
+     3→  {
+     4→   "cell_type": "code",
+     5→   "execution_count": null,
+     6→   "metadata": {},
+     7→   "outputs": [],
+     8→   "source": [
+     9→    "# install pulp, if you already have it, you can skip this step\n",
+    10→    "# ! pip install pulp"
+    11→   ]
+    12→  },
+    13→  {
+    14→   "cell_type": "code",
+    15→   "execution_count": null,
+    16→   "metadata": {},
+    17→   "outputs": [],
+    18→   "source": [
+    19→    "import numpy as np\n",
+    20→    "from pulp import *\n",
+    21→    "import pulp"
+    22→   ]
+    23→  },
+    24→  {
+    25→   "cell_type": "markdown",
+    26→   "metadata": {},
+    27→   "source": [
+    28→    "# ResNet18"
+    29→   ]
+    30→  },
+    31→  {
+    32→   "cell_type": "code",
+    33→   "execution_count": null,
+    34→   "metadata": {},
+    35→   "outputs": [],
+    36→   "source": [
+    37→    "class args():\n",
+    38→    "    def __init__(self):\n",
+    39→    "        pass\n",
+    40→    "args = args\n",
+    41→    "args.model_size_limit = 0.5 # the model size limit, 0.25 means, 4bit_model_size * 0.75 + 8bit_model_size * 0.25\n",
+    42→    "args.bops_limit = 0.5 # same definition as above\n",
+    43→    "args.latency_limit = 0.5 # same definition as above"
+    44→   ]
+    45→  },
+    46→  {
+    47→   "cell_type": "code",
+    48→   "execution_count": null,
+    49→   "metadata": {},
+    50→   "outputs": [],
+    51→   "source": [
+    52→    "# those are different matrics\n",
+    53→    "\n",
+    54→    "# Hutchinson_trace means the trace of Hessian for each weight matrix.\n",
+    55→    "# Particular, it has 19 elements since ResNet18 has 18 layers, removing the first and last layer \n",
+    56→    "# we still have 16 layers (the other three come from residual connection layer)\n",
+    57→    "# These values are already normlized, i.e., Trace / # arameters\n",
+    58→    "Hutchinson_trace = np.array([0.06857826, 0.03162379, 0.03298575, 0.01205663, 0.02222431, 0.00596336, 0.06931772, 0.00807129, 0.00372905, 0.00530698, 0.00209011, 0.00737569, 0.00210454, 0.00151197, 0.00158041,0.00078146, 0.00451841, 0.00098745, 0.00072944])\n",
+    59→    "# Delta Weight 8 bit Square means \\| W_fp32 - W_int8  \\|_2^2\n",
+    60→    "delta_weights_8bit_square = np.array([0.0235, 0.0125, 0.0102, 0.0082, 0.0145, 0.0344, 0.0023, 0.0287, 0.0148, 0.0333, 0.0682, 0.0027, 0.0448, 0.0336, 0.0576, 0.1130, 0.0102, 0.0947, 0.0532]) #  = (w_fp32 - w_int8)^2\n",
+    61→    "# Delta Weight 4 bit Square means \\| W_fp32 - W_int4  \\|_2^2\n",
+    62→    "delta_weights_4bit_square = np.array([6.7430, 3.9691, 3.3281, 2.6796, 4.7277, 10.5966, 0.6827, 9.0942, 4.8857, 10.7599, 21.7546, 0.8603, 14.5324, 10.9651, 18.7706, 36.4044, 3.1572, 29.6994, 17.4016]) #  = (w_fp32 - w_int4)^2\n",
+    63→    "# number of paramers of each layer\n",
+    64→    "parameters = np.array([ 36864, 36864, 36864, 36864, 73728, 147456, 8192, 147456, 147456, 294912, 589824, 32768, 589824, 589824, 1179648, 2359296, 131072, 2359296, 2359296]) / 1024 / 1024 # make it millition based (1024 is due to Byte to MB see next cell for model size computation)\n",
+    65→    "# Bit Operators of each layer\n",
+    66→    "bops = np.array([115605504, 115605504, 115605504, 115605504, 57802752, 115605504, 6422528, 115605504, 115605504, 57802752, 115605504, 6422528, 115605504, 115605504, 57802752, 115605504, 6422528, 115605504, 115605504]) / 1000000 # num of bops for each layer/block\n",
+    67→    "# latency for INT4 and INT8, measured on T4 GPU\n",
+    68→    "latency_int4 = np.array([0.21094404, 0.21092674, 0.21104113, 0.21086851, 0.13642465, 0.19167506, 0.02532183, 0.19148203, 0.19142914, 0.11395316, 0.20556011, 0.01917474, 0.20566918, 0.20566509, 0.13185102, 0.22287786, 0.01790088, 0.22304611, 0.22286099])\n",
+    69→    "latency_int8 = np.array([0.36189111, 0.36211718, 0.31141909, 0.30454471, 0.19184896, 0.38948934, 0.0334169, 0.38904905, 0.3892859, 0.19134735, 0.34307431, 0.02802354, 0.34313329, 0.34310756, 0.21117103, 0.37376585, 0.02896843, 0.37398187, 0.37405185])"
+    70→   ]
+    71→  },
+    72→  {
+    73→   "cell_type": "code",
+    74→   "execution_count": null,
+    75→   "metadata": {},
+    76→   "outputs": [],
+    77→   "source": [
+    78→    "# do some calculatations first\n",
+    79→    "# model size\n",
+    80→    "model_size_32bit = np.sum(parameters) * 4. # MB\n",
+    81→    "model_size_8bit = model_size_32bit / 4. # 8bit model is 1/4 of 32bit model \n",
+    82→    "model_size_4bit = model_size_32bit / 8. # 4bit model is 1/8 of 32bit model \n",
+    83→    "# as mentioned previous, that's how we set the model size limit\n",
+    84→    "model_size_limit = model_size_4bit + (model_size_8bit - model_size_4bit) * args.model_size_limit\n",
+    85→    "\n",
+    86→    "# bops\n",
+    87→    "bops_8bit = bops / 4. / 4. # For Wx, we have two matrices, so that we need the (bops / 4 / 4)\n",
+    88→    "bops_4bit = bops / 8. / 8. # Similar to above line\n",
+    89→    "bops_limit = np.sum(bops_4bit) + (np.sum(bops_8bit) - np.sum(bops_4bit)) * args.bops_limit # similar to model size\n",
+    90→    "\n",
+    91→    "# latency \n",
+    92→    "latency_limit = np.sum(latency_int4) + (np.sum(latency_int8) - np.sum(latency_int4)) * args.latency_limit # similar to model size"
+    93→   ]
+    94→  },
+    95→  {
+    96→   "cell_type": "markdown",
+    97→   "metadata": {},
+    98→   "source": [
+    99→    "### Model Size Constrait"
+   100→   ]
+   101→  },
+   102→  {
+   103→   "cell_type": "code",
+   104→   "execution_count": null,
+   105→   "metadata": {},
+   106→   "outputs": [],
+   107→   "source": [
+   108→    "# Let's construct the problem \n",
+   109→    "num_variable = Hutchinson_trace.shape[0]\n",
+   110→    "\n",
+   111→    "# first get the variables, here 1 means 4 bit and 2 means 8 bit\n",
+   112→    "variable = {}\n",
+   113→    "for i in range(num_variable):\n",
+   114→    "    variable[f\"x{i}\"] = LpVariable(f\"x{i}\", 1, 2, cat=LpInteger)"
+   115→   ]
+   116→  },
+   117→  {
+   118→   "cell_type": "code",
+   119→   "execution_count": null,
+   120→   "metadata": {},
+   121→   "outputs": [],
+   122→   "source": [
+   123→    "prob = LpProblem(\"Model_Size\", LpMinimize)\n",
+   124→    "prob += sum([0.5 * variable[f\"x{i}\"] * parameters[i] for i in range(num_variable) ]) <= model_size_limit # 1 million 8 bit numbers means 1 Mb, here 0.5 * 2 = 1, similar for 4 bit\n",
+   125→    "\n",
+   126→    "# add downsampling layer constraint, here we make the residual connetction\n",
+   127→    "# layer have the same bit as the main stream\n",
+   128→    "prob += variable[f\"x4\"] ==variable[f\"x6\"]\n",
+   129→    "prob += variable[f\"x9\"] ==variable[f\"x11\"]\n",
+   130→    "prob += variable[f\"x14\"] ==variable[f\"x16\"]\n",
+   131→    "\n",
+   132→    "sensitivity_difference_between_4_8 = Hutchinson_trace * ( delta_weights_8bit_square  - delta_weights_4bit_square ) # here is the sensitivity different between 4 and 8\n",
+   133→    "\n",
+   134→    "# for fixed bops, we want large models, as well as smaller sensitivy\n",
+   135→    "# here sensitivity_difference_between is negative numbers, so if x = 1, means using 4 bit, gives us 0, and if x = 2, means using 8 bits, gives us negavie numers. It will prefer 8 bit\n",
+   136→    "# negative model size is negaive number. It will prefer 8 bit.\n",
+   137→    "# both prefer 8 bit but the bops is constrained, so we get a tradeoff. \n",
+   138→    "prob += sum( [ (variable[f\"x{i}\"] - 1) * sensitivity_difference_between_4_8[i] for i in range(num_variable) ] )  \n",
+   139→    "\n",
+   140→    "# solve the problem\n",
+   141→    "status = prob.solve(GLPK_CMD(msg=1, options=[\"--tmlim\", \"10000\",\"--simplex\"]))\n",
+   142→    "# status = prob.solve(COIN_CMD(msg=1, options=['dualSimplex']))\n",
+   143→    "# status = prob.solve(GLPK(msg=1, options=[\"--tmlim\", \"10\",\"--dualSimplex\"]))\n",
+   144→    "\n",
+   145→    "# get the result\n",
+   146→    "LpStatus[status]\n",
+   147→    "\n",
+   148→    "result = []\n",
+   149→    "for i in range(num_variable):\n",
+   150→    "    result.append(value(variable[f\"x{i}\"]))\n",
+   151→    "result = np.array(result)\n",
+   152→    "\n",
+   153→    "print(result)\n",
+   154→    "# Note that this model size does not count the first and last layer of the network\n",
+   155→    "# In the paper, we manually added this two layers in the final result\n",
+   156→    "print('Model Size:', np.sum(result * parameters * 4 * 4 / 32))\n",
+   157→    "result_4 = (result == 1)\n",
+   158→    "result_8 = (result == 2)\n",
+   159→    "print(\"Bops: \", np.sum(bops_4bit[result_4]) + np.sum(bops_8bit[result_8]))\n",
+   160→    "print(\"Latency: \", np.sum(latency_int4[result_4]) + np.sum(latency_int8[result_8]))"
+   161→   ]
+   162→  },
+   163→  {
+   164→   "cell_type": "markdown",
+   165→   "metadata": {},
+   166→   "source": [
+   167→    "### Bops Constrait"
+   168→   ]
+   169→  },
+   170→  {
+   171→   "cell_type": "code",
+   172→   "execution_count": null,
+   173→   "metadata": {},
+   174→   "outputs": [],
+   175→   "source": [
+   176→    "# Let's construct the problem \n",
+   177→    "num_variable = Hutchinson_trace.shape[0]\n",
+   178→    "\n",
+   179→    "# first get the variables, here 1 means 4 bit and 2 means 8 bit\n",
+   180→    "variable = {}\n",
+   181→    "for i in range(num_variable):\n",
+   182→    "    variable[f\"x{i}\"] = LpVariable(f\"x{i}\", 1, 2, cat=LpInteger)"
+   183→   ]
+   184→  },
+   185→  {
+   186→   "cell_type": "code",
+   187→   "execution_count": null,
+   188→   "metadata": {},
+   189→   "outputs": [],
+   190→   "source": [
+   191→    "prob = LpProblem(\"BOPS\", LpMinimize)\n",
+   192→    "\n",
+   193→    "bops_difference_between_4_8 = bops_8bit - bops_4bit\n",
+   194→    "\n",
+   195→    "# add bops constraint\n",
+   196→    "prob += sum([ bops_4bit[i] + (variable[f\"x{i}\"] - 1) * bops_difference_between_4_8[i] for i in range(num_variable) ]) <= bops_limit # if 4 bit, x - 1 = 0, we use bops_4, if 8 bit, x-1=2, we use bops_diff + bos_4 = bops_8\n",
+   197→    "# add downsampling layer constraint\n",
+   198→    "prob += variable[f\"x4\"] ==variable[f\"x6\"]\n",
+   199→    "prob += variable[f\"x9\"] ==variable[f\"x11\"]\n",
+   200→    "prob += variable[f\"x14\"] ==variable[f\"x16\"]\n",
+   201→    "\n",
+   202→    "sensitivity_difference_between_4_8 = Hutchinson_trace * ( delta_weights_8bit_square  - delta_weights_4bit_square ) # here is the sensitivity different between 4 and 8\n",
+   203→    "\n",
+   204→    "# for fixed bops, we want large models, as well as smaller sensitivy\n",
+   205→    "# here sensitivity_difference_between is negative numbers, so if x = 1, means using 4 bit, gives us 0, and if x = 2, means using 8 bits, gives us negavie numers. It will prefer 8 bit\n",
+   206→    "# negative model size is negaive number. It will prefer 8 bit.\n",
+   207→    "# both prefer 8 bit but the bops is constrained, so we get a tradeoff. \n",
+   208→    "prob += sum( [ (variable[f\"x{i}\"] - 1) * sensitivity_difference_between_4_8[i] for i in range(num_variable) ] )  \n",
+   209→    "\n",
+   210→    "# solve the problem\n",
+   211→    "status = prob.solve(GLPK_CMD(msg=1, options=[\"--tmlim\", \"10000\",\"--simplex\"]))\n",
+   212→    "# status = prob.solve(COIN_CMD(msg=1, options=['dualSimplex']))\n",
+   213→    "# status = prob.solve(GLPK(msg=1, options=[\"--tmlim\", \"10\",\"--dualSimplex\"]))\n",
+   214→    "\n",
+   215→    "# get the result\n",
+   216→    "LpStatus[status]\n",
+   217→    "\n",
+   218→    "result = []\n",
+   219→    "for i in range(num_variable):\n",
+   220→    "    result.append(value(variable[f\"x{i}\"]))\n",
+   221→    "result = np.array(result)\n",
+   222→    "\n",
+   223→    "print(result)\n",
+   224→    "# Note that this model size does not count the first and last layer of the network\n",
+   225→    "# In the paper, we manually added this two layers in the final result\n",
+   226→    "print('Model Size:', np.sum(result * parameters * 4 * 4 / 32))\n",
+   227→    "result_4 = (result == 1)\n",
+   228→    "result_8 = (result == 2)\n",
+   229→    "print(\"Bops: \", np.sum(bops_4bit[result_4]) + np.sum(bops_8bit[result_8]))\n",
+   230→    "print(\"Latency: \", np.sum(latency_int4[result_4]) + np.sum(latency_int8[result_8]))"
+   231→   ]
+   232→  },
+   233→  {
+   234→   "cell_type": "markdown",
+   235→   "metadata": {},
+   236→   "source": [
+   237→    "# latency Constrait"
+   238→   ]
+   239→  },
+   240→  {
+   241→   "cell_type": "code",
+   242→   "execution_count": null,
+   243→   "metadata": {},
+   244→   "outputs": [],
+   245→   "source": [
+   246→    "# Let's construct the problem \n",
+   247→    "num_variable = Hutchinson_trace.shape[0]\n",
+   248→    "\n",
+   249→    "# first get the variables, here 1 means 4 bit and 2 means 8 bit\n",
+   250→    "variable = {}\n",
+   251→    "for i in range(num_variable):\n",
+   252→    "    variable[f\"x{i}\"] = LpVariable(f\"x{i}\", 1, 2, cat=LpInteger)"
+   253→   ]
+   254→  },
+   255→  {
+   256→   "cell_type": "code",
+   257→   "execution_count": null,
+   258→   "metadata": {},
+   259→   "outputs": [],
+   260→   "source": [
+   261→    "prob = LpProblem(\"BOPS\", LpMinimize)\n",
+   262→    "\n",
+   263→    "latency_difference_between_4_8 = latency_int8 - latency_int4\n",
+   264→    "\n",
+   265→    "# add bops constraint\n",
+   266→    "prob += sum([ latency_int4[i] + (variable[f\"x{i}\"] - 1) * latency_difference_between_4_8[i] for i in range(num_variable) ]) <= latency_limit # if 4 bit, x - 1 = 0, we use bops_4, if 8 bit, x-1=2, we use bops_diff + bos_4 = bops_8\n",
+   267→    "# add downsampling layer constraint\n",
+   268→    "prob += variable[f\"x4\"] ==variable[f\"x6\"]\n",
+   269→    "prob += variable[f\"x9\"] ==variable[f\"x11\"]\n",
+   270→    "prob += variable[f\"x14\"] ==variable[f\"x16\"]\n",
+   271→    "\n",
+   272→    "sensitivity_difference_between_4_8 = Hutchinson_trace * ( delta_weights_8bit_square  - delta_weights_4bit_square ) # here is the sensitivity different between 4 and 8\n",
+   273→    "\n",
+   274→    "# for fixed latency, we want large models, as well as smaller sensitivy\n",
+   275→    "# here sensitivity_difference_between is negative numbers, so if x = 1, means using 4 bit, gives us 0, and if x = 2, means using 8 bits, gives us negavie numers. It will prefer 8 bit\n",
+   276→    "# negative model size is negaive number. It will prefer 8 bit.\n",
+   277→    "# both prefer 8 bit but the bops is constrained, so we get a tradeoff. \n",
+   278→    "prob += sum( [ (variable[f\"x{i}\"] - 1) * sensitivity_difference_between_4_8[i] for i in range(num_variable) ] )  \n",
+   279→    "\n",
+   280→    "# solve the problem\n",
+   281→    "status = prob.solve(GLPK_CMD(msg=1, options=[\"--tmlim\", \"10000\",\"--simplex\"]))\n",
+   282→    "# status = prob.solve(COIN_CMD(msg=1, options=['dualSimplex']))\n",
+   283→    "# status = prob.solve(GLPK(msg=1, options=[\"--tmlim\", \"10\",\"--dualSimplex\"]))\n",
+   284→    "\n",
+   285→    "# get the result\n",
+   286→    "LpStatus[status]\n",
+   287→    "\n",
+   288→    "result = []\n",
+   289→    "for i in range(num_variable):\n",
+   290→    "    result.append(value(variable[f\"x{i}\"]))\n",
+   291→    "result = np.array(result)\n",
+   292→    "\n",
+   293→    "print(result)\n",
+   294→    "# Note that this model size does not count the first and last layer of the network\n",
+   295→    "# In the paper, we manually added this two layers in the final result\n",
+   296→    "print('Model Size:', np.sum(result * parameters * 4 * 4 / 32))\n",
+   297→    "result_4 = (result == 1)\n",
+   298→    "result_8 = (result == 2)\n",
+   299→    "print(\"Bops: \", np.sum(bops_4bit[result_4]) + np.sum(bops_8bit[result_8]))\n",
+   300→    "print(\"Latency: \", np.sum(latency_int4[result_4]) + np.sum(latency_int8[result_8]))"
+   301→   ]
+   302→  },
+   303→  {
+   304→   "cell_type": "markdown",
+   305→   "metadata": {},
+   306→   "source": [
+   307→    "# ResNet50"
+   308→   ]
+   309→  },
+   310→  {
+   311→   "cell_type": "code",
+   312→   "execution_count": null,
+   313→   "metadata": {},
+   314→   "outputs": [],
+   315→   "source": [
+   316→    "class args():\n",
+   317→    "    def __init__(self):\n",
+   318→    "        pass\n",
+   319→    "args = args\n",
+   320→    "args.model_size_limit = 0.5\n",
+   321→    "args.bops_limit = 0.5\n",
+   322→    "args.latency_limit = 0.5"
+   323→   ]
+   324→  },
+   325→  {
+   326→   "cell_type": "code",
+   327→   "execution_count": null,
+   328→   "metadata": {},
+   329→   "outputs": [],
+   330→   "source": [
+   331→    "Hutchinson_trace = np.array([0.19270050525665214, 0.026702478528024147, 0.09448622912168206, 0.07639402896166123, 0.009688886813818761, 0.006711237132549379, 0.024378638714551495, 0.011769247241317709, 0.00250671175308565, 0.008039989508690044, 0.008477769792080075, 0.0017263438785415808, 0.00313899479806392, 0.004365175962448905, 0.0015507987700405636, 0.0015619333134963605, 0.002701229648662333, 0.002383587881922602, 0.0010320576839146385, 0.0025724433362483905, 0.0046385480090998495, 0.0008540530106982067, 0.003809824585913301, 0.0019535077735770134, 0.0005609235377052988, 0.0018696154002090816, 0.0016933275619534234, 0.000607571622821307, 0.00044498199713291893, 0.0008382285595869651, 0.0006031448720029394, 0.0003951200051233584, 0.000718781026080718, 0.0008380718063555912, 0.00037973490543638077, 0.000828751828521126, 0.0013068615226087446, 0.0004476536996660732, 0.0012669296702365405, 0.0013098433846609064, 0.00032695921254355777, 0.0012137993471687096, 0.0010635341750463423, 0.0002480300900066659, 0.0005943655269220451, 0.0007215500227179646, 0.000612712872680123, 0.00025412911781990733, 0.0005049526807847556, 0.0007025265367691074, 0.0002485941222403296, 0.000525604293216296])\n",
+   332→    "delta_weights_8bit_square = np.array([0.0031, 0.0025, 0.0123, 0.0025, 0.0024, 0.0062, 0.0019, 0.0023, 0.0030, 0.0010, 0.0140, 0.0052, 0.0204, 0.0054, 0.0064, 0.0141, 0.0041, 0.0067, 0.0094, 0.0029, 0.0103, 0.0095, 0.0030, 0.0243, 0.0140, 0.0371, 0.0131, 0.0144, 0.0270, 0.0078, 0.0147, 0.0192, 0.0066, 0.0162, 0.0210, 0.0063, 0.0161, 0.0169, 0.0054, 0.0194, 0.0241, 0.0061, 0.0436, 0.0267, 0.0551, 0.0217, 0.0533, 0.0589, 0.0212, 0.0562, 0.0392, 0.0246])\n",
+   333→    "delta_weights_4bit_square = np.array([0.9257, 0.6624, 3.4605, 0.7805, 0.8040, 2.0657, 0.5947, 0.7596, 0.9826, 0.3381, 4.0922, 1.5506, 6.0288, 1.7186, 2.0701, 4.6080, 1.3128, 2.1613, 3.0710, 0.9209, 3.2794, 3.0883, 0.9841, 7.7154, 4.3872, 11.7131,4.1949, 4.6766, 8.7215, 2.5369, 4.8132, 6.1627, 2.1765, 5.2257, 6.7500, 2.0171, 5.2612, 5.5459, 1.7509, 6.2498, 7.4798, 1.9959, 13.8412,8.3407, 18.0200,6.9997, 15.3605,17.5150,6.4017, 16.0258, 10.7682, 8.0800])\n",
+   334→    "parameters = np.array([0.004096, 0.036864, 0.016384, 0.016384, 0.016384, 0.036864, 0.016384, 0.016384, 0.036864, 0.016384, 0.032768, 0.147456, 0.065536, 0.131072, 0.065536, 0.147456, 0.065536, 0.065536, 0.147456, 0.065536, 0.065536, 0.147456, 0.065536, 0.131072, 0.589824, 0.262144, 0.524288, 0.262144, 0.589824, 0.262144, 0.262144, 0.589824, 0.262144, 0.262144, 0.589824, 0.262144, 0.262144, 0.589824, 0.262144, 0.262144, 0.589824, 0.262144, 0.524288, 2.359296, 1.048576, 2.097152, 1.048576, 2.359296, 1.048576, 1.048576, 2.359296, 1.048576])\n",
+   335→    "bops = np.array([12.845056, 115.605504, 51.380224, 51.380224, 51.380224, 115.605504, 51.380224, 51.380224, 115.605504, 51.380224, 25.690112, 115.605504, 51.380224, 102.760448, 51.380224, 115.605504, 51.380224, 51.380224, 115.605504, 51.380224, 51.380224, 115.605504, 51.380224, 25.690112, 115.605504, 51.380224, 102.760448, 51.380224, 115.605504, 51.380224, 51.380224, 115.605504, 51.380224, 51.380224, 115.605504, 51.380224, 51.380224, 115.605504, 51.380224, 51.380224, 115.605504, 51.380224, 25.690112, 115.605504, 51.380224, 102.760448, 51.380224, 115.605504, 51.380224, 51.380224, 115.605504, 51.380224])\n",
+   336→    "\n",
+   337→    "latency_int4 = np.array([0.07018191, 0.22481827, 0.27510223, 0.27512618, 0.10512171, 0.22473146, 0.21536969, 0.10506169, 0.22481533, 0.18938694, 0.05091347, 0.19677368, 0.15108796, 0.16824758, 0.0848311, 0.19684267, 0.15120609, 0.08481235, 0.19667935, 0.15121574, 0.08476754, 0.19673882, 0.15123765, 0.04866963, 0.20606097, 0.10150094, 0.169953, 0.09355929, 0.20598819, 0.10146334, 0.09362463, 0.20609737, 0.10188489, 0.09360134, 0.20618122, 0.10150974, 0.09352375, 0.20603792, 0.1015803, 0.09365549, 0.20599906, 0.10143032, 0.08047627, 0.207775, 0.08819472, 0.17924989, 0.10268331, 0.20780669, 0.08795617, 0.10265705, 0.20781191, 0.08793056])\n",
+   338→    "latency_int8 = np.array([0.07079369, 0.36040637, 0.27649506, 0.276513, 0.1611783, 0.36101955, 0.276361, 0.16111273, 0.36064923, 0.24884412, 0.07218692, 0.34899773, 0.19600394, 0.29505887, 0.16074604, 0.34904888, 0.19603683, 0.16067593, 0.34919751, 0.1960506, 0.16089535, 0.34916001, 0.19616036, 0.08172319, 0.33166738, 0.15534599, 0.30712053, 0.15510333, 0.33172639, 0.15541728, 0.15290036, 0.3317953, 0.15551916, 0.15252759, 0.33165544, 0.15529572, 0.15229388, 0.33187364, 0.15545004, 0.15275891, 0.33161443, 0.15566678, 0.08390548, 0.33057286, 0.15200003, 0.33919933, 0.16635967, 0.33092922, 0.15179218, 0.16672966, 0.33086648, 0.1519619])"
+   339→   ]
+   340→  },
+   341→  {
+   342→   "cell_type": "code",
+   343→   "execution_count": null,
+   344→   "metadata": {},
+   345→   "outputs": [],
+   346→   "source": [
+   347→    "# do some calculatations first\n",
+   348→    "# model size\n",
+   349→    "model_size_32bit = np.sum(parameters) * 4. # MB\n",
+   350→    "model_size_8bit = model_size_32bit / 4.\n",
+   351→    "model_size_4bit = model_size_32bit / 8.\n",
+   352→    "model_size_limit = model_size_4bit + (model_size_8bit - model_size_4bit) * args.model_size_limit\n",
+   353→    "\n",
+   354→    "# bops\n",
+   355→    "bops_8bit = bops / 4. / 4.\n",
+   356→    "bops_4bit = bops / 8. / 8.\n",
+   357→    "bops_limit = np.sum(bops_4bit) + (np.sum(bops_8bit) - np.sum(bops_4bit)) * args.bops_limit\n",
+   358→    "\n",
+   359→    "# latency \n",
+   360→    "latency_limit = np.sum(latency_int4) + (np.sum(latency_int8) - np.sum(latency_int4)) * args.latency_limit"
+   361→   ]
+   362→  },
+   363→  {
+   364→   "cell_type": "markdown",
+   365→   "metadata": {},
+   366→   "source": [
+   367→    "### Model Size Constrait"
+   368→   ]
+   369→  },
+   370→  {
+   371→   "cell_type": "code",
+   372→   "execution_count": null,
+   373→   "metadata": {},
+   374→   "outputs": [],
+   375→   "source": [
+   376→    "# Let's construct the problem \n",
+   377→    "num_variable = Hutchinson_trace.shape[0]\n",
+   378→    "\n",
+   379→    "# first get the variables, here 1 means 4 bit and 2 means 8 bit\n",
+   380→    "variable = {}\n",
+   381→    "for i in range(num_variable):\n",
+   382→    "    variable[f\"x{i}\"] = LpVariable(f\"x{i}\", 1, 2, cat=LpInteger)"
+   383→   ]
+   384→  },
+   385→  {
+   386→   "cell_type": "code",
+   387→   "execution_count": null,
+   388→   "metadata": {},
+   389→   "outputs": [],
+   390→   "source": [
+   391→    "prob = LpProblem(\"Model_Size\", LpMinimize)\n",
+   392→    "prob += sum([0.5 * variable[f\"x{i}\"] * parameters[i] for i in range(num_variable) ]) <= model_size_limit # 1 million 8 bit numbers means 1 Mb, here 0.5 * 2 = 1, similar for 4 bit\n",
+   393→    "\n",
+   394→    "# add downsampling layer constraint\n",
+   395→    "prob += variable[f\"x0\"] ==variable[f\"x3\"]\n",
+   396→    "prob += variable[f\"x10\"] ==variable[f\"x13\"]\n",
+   397→    "prob += variable[f\"x23\"] ==variable[f\"x26\"]\n",
+   398→    "prob += variable[f\"x42\"] ==variable[f\"x45\"]\n",
+   399→    "\n",
+   400→    "sensitivity_difference_between_4_8 = Hutchinson_trace * ( delta_weights_8bit_square  - delta_weights_4bit_square ) # here is the sensitivity different between 4 and 8\n",
+   401→    "\n",
+   402→    "# for fixed bops, we want large models, as well as smaller sensitivy\n",
+   403→    "# here sensitivity_difference_between is negative numbers, so if x = 1, means using 4 bit, gives us 0, and if x = 2, means using 8 bits, gives us negavie numers. It will prefer 8 bit\n",
+   404→    "# negative model size is negaive number. It will prefer 8 bit.\n",
+   405→    "# both prefer 8 bit but the bops is constrained, so we get a tradeoff. \n",
+   406→    "prob += sum( [ (variable[f\"x{i}\"] - 1) * sensitivity_difference_between_4_8[i] for i in range(num_variable) ] )  \n",
+   407→    "\n",
+   408→    "# solve the problem\n",
+   409→    "status = prob.solve(GLPK_CMD(msg=1, options=[\"--tmlim\", \"10000\",\"--simplex\"]))\n",
+   410→    "# status = prob.solve(COIN_CMD(msg=1, options=['dualSimplex']))\n",
+   411→    "# status = prob.solve(GLPK(msg=1, options=[\"--tmlim\", \"10\",\"--dualSimplex\"]))\n",
+   412→    "\n",
+   413→    "# get the result\n",
+   414→    "LpStatus[status]\n",
+   415→    "\n",
+   416→    "result = []\n",
+   417→    "for i in range(num_variable):\n",
+   418→    "    result.append(value(variable[f\"x{i}\"]))\n",
+   419→    "result = np.array(result)\n",
+   420→    "\n",
+   421→    "print(result)\n",
+   422→    "# Note that this model size does not count the first and last layer of the network\n",
+   423→    "# In the paper, we manually added this two layers in the final result\n",
+   424→    "print('Model Size:', np.sum(result * parameters * 4 * 4 / 32))\n",
+   425→    "result_4 = (result == 1)\n",
+   426→    "result_8 = (result == 2)\n",
+   427→    "print(\"Bops: \", np.sum(bops_4bit[result_4]) + np.sum(bops_8bit[result_8]))\n",
+   428→    "print(\"Latency: \", np.sum(latency_int4[result_4]) + np.sum(latency_int8[result_8]))"
+   429→   ]
+   430→  },
+   431→  {
+   432→   "cell_type": "markdown",
+   433→   "metadata": {},
+   434→   "source": [
+   435→    "### Bops Constrait"
+   436→   ]
+   437→  },
+   438→  {
+   439→   "cell_type": "code",
+   440→   "execution_count": null,
+   441→   "metadata": {},
+   442→   "outputs": [],
+   443→   "source": [
+   444→    "# Let's construct the problem \n",
+   445→    "num_variable = Hutchinson_trace.shape[0]\n",
+   446→    "\n",
+   447→    "# first get the variables, here 1 means 4 bit and 2 means 8 bit\n",
+   448→    "variable = {}\n",
+   449→    "for i in range(num_variable):\n",
+   450→    "    variable[f\"x{i}\"] = LpVariable(f\"x{i}\", 1, 2, cat=LpInteger)"
+   451→   ]
+   452→  },
+   453→  {
+   454→   "cell_type": "code",
+   455→   "execution_count": null,
+   456→   "metadata": {},
+   457→   "outputs": [],
+   458→   "source": [
+   459→    "prob = LpProblem(\"BOPS\", LpMinimize)\n",
+   460→    "\n",
+   461→    "bops_difference_between_4_8 = bops_8bit - bops_4bit\n",
+   462→    "\n",
+   463→    "# add bops constraint\n",
+   464→    "prob += sum([ bops_4bit[i] + (variable[f\"x{i}\"] - 1) * bops_difference_between_4_8[i] for i in range(num_variable) ]) <= bops_limit # if 4 bit, x - 1 = 0, we use bops_4, if 8 bit, x-1=2, we use bops_diff + bos_4 = bops_8\n",
+   465→    "# add downsampling layer constraint\n",
+   466→    "prob += variable[f\"x0\"] ==variable[f\"x3\"]\n",
+   467→    "prob += variable[f\"x10\"] ==variable[f\"x13\"]\n",
+   468→    "prob += variable[f\"x23\"] ==variable[f\"x26\"]\n",
+   469→    "prob += variable[f\"x42\"] ==variable[f\"x45\"]\n",
+   470→    "\n",
+   471→    "sensitivity_difference_between_4_8 = Hutchinson_trace * ( delta_weights_8bit_square  - delta_weights_4bit_square ) # here is the sensitivity different between 4 and 8\n",
+   472→    "\n",
+   473→    "# for fixed bops, we want large models, as well as smaller sensitivy\n",
+   474→    "# here sensitivity_difference_between is negative numbers, so if x = 1, means using 4 bit, gives us 0, and if x = 2, means using 8 bits, gives us negavie numers. It will prefer 8 bit\n",
+   475→    "# negative model size is negaive number. It will prefer 8 bit.\n",
+   476→    "# both prefer 8 bit but the bops is constrained, so we get a tradeoff. \n",
+   477→    "prob += sum( [ (variable[f\"x{i}\"] - 1) * sensitivity_difference_between_4_8[i] for i in range(num_variable) ] )  \n",
+   478→    "\n",
+   479→    "# solve the problem\n",
+   480→    "status = prob.solve(GLPK_CMD(msg=1, options=[\"--tmlim\", \"10000\",\"--simplex\"]))\n",
+   481→    "# status = prob.solve(COIN_CMD(msg=1, options=['dualSimplex']))\n",
+   482→    "# status = prob.solve(GLPK(msg=1, options=[\"--tmlim\", \"10\",\"--dualSimplex\"]))\n",
+   483→    "\n",
+   484→    "# get the result\n",
+   485→    "LpStatus[status]\n",
+   486→    "\n",
+   487→    "result = []\n",
+   488→    "for i in range(num_variable):\n",
+   489→    "    result.append(value(variable[f\"x{i}\"]))\n",
+   490→    "result = np.array(result)\n",
+   491→    "\n",
+   492→    "print(result)\n",
+   493→    "# Note that this model size does not count the first and last layer of the network\n",
+   494→    "# In the paper, we manually added this two layers in the final result\n",
+   495→    "print('Model Size:', np.sum(result * parameters * 4 * 4 / 32))\n",
+   496→    "result_4 = (result == 1)\n",
+   497→    "result_8 = (result == 2)\n",
+   498→    "print(\"Bops: \", np.sum(bops_4bit[result_4]) + np.sum(bops_8bit[result_8]))\n",
+   499→    "print(\"Latency: \", np.sum(latency_int4[result_4]) + np.sum(latency_int8[result_8]))"
+   500→   ]
+   501→  },
+   502→  {
+   503→   "cell_type": "markdown",
+   504→   "metadata": {},
+   505→   "source": [
+   506→    "# Latency Constrait"
+   507→   ]
+   508→  },
+   509→  {
+   510→   "cell_type": "code",
+   511→   "execution_count": null,
+   512→   "metadata": {},
+   513→   "outputs": [],
+   514→   "source": [
+   515→    "# Let's construct the problem \n",
+   516→    "num_variable = Hutchinson_trace.shape[0]\n",
+   517→    "\n",
+   518→    "# first get the variables, here 1 means 4 bit and 2 means 8 bit\n",
+   519→    "variable = {}\n",
+   520→    "for i in range(num_variable):\n",
+   521→    "    variable[f\"x{i}\"] = LpVariable(f\"x{i}\", 1, 2, cat=LpInteger)"
+   522→   ]
+   523→  },
+   524→  {
+   525→   "cell_type": "code",
+   526→   "execution_count": null,
+   527→   "metadata": {},
+   528→   "outputs": [],
+   529→   "source": [
+   530→    "prob = LpProblem(\"BOPS\", LpMinimize)\n",
+   531→    "\n",
+   532→    "latency_difference_between_4_8 = latency_int8 - latency_int4\n",
+   533→    "\n",
+   534→    "# add bops constraint\n",
+   535→    "prob += sum([ latency_int4[i] + (variable[f\"x{i}\"] - 1) * latency_difference_between_4_8[i] for i in range(num_variable) ]) <= latency_limit # if 4 bit, x - 1 = 0, we use bops_4, if 8 bit, x-1=2, we use bops_diff + bos_4 = bops_8\n",
+   536→    "# add downsampling layer constraint\n",
+   537→    "prob += variable[f\"x0\"] ==variable[f\"x3\"]\n",
+   538→    "prob += variable[f\"x10\"] ==variable[f\"x13\"]\n",
+   539→    "prob += variable[f\"x23\"] ==variable[f\"x26\"]\n",
+   540→    "prob += variable[f\"x42\"] ==variable[f\"x45\"]\n",
+   541→    "\n",
+   542→    "sensitivity_difference_between_4_8 = Hutchinson_trace * ( delta_weights_8bit_square  - delta_weights_4bit_square ) # here is the sensitivity different between 4 and 8\n",
+   543→    "\n",
+   544→    "# for fixed bops, we want large models, as well as smaller sensitivy\n",
+   545→    "# here sensitivity_difference_between is negative numbers, so if x = 1, means using 4 bit, gives us 0, and if x = 2, means using 8 bits, gives us negavie numers. It will prefer 8 bit\n",
+   546→    "# negative model size is negaive number. It will prefer 8 bit.\n",
+   547→    "# both prefer 8 bit but the bops is constrained, so we get a tradeoff. \n",
+   548→    "prob += sum( [ (variable[f\"x{i}\"] - 1) * sensitivity_difference_between_4_8[i] for i in range(num_variable) ] )  \n",
+   549→    "\n",
+   550→    "# solve the problem\n",
+   551→    "status = prob.solve(GLPK_CMD(msg=1, options=[\"--tmlim\", \"10000\",\"--simplex\"]))\n",
+   552→    "# status = prob.solve(COIN_CMD(msg=1, options=['dualSimplex']))\n",
+   553→    "# status = prob.solve(GLPK(msg=1, options=[\"--tmlim\", \"10\",\"--dualSimplex\"]))\n",
+   554→    "\n",
+   555→    "# get the result\n",
+   556→    "LpStatus[status]\n",
+   557→    "\n",
+   558→    "result = []\n",
+   559→    "for i in range(num_variable):\n",
+   560→    "    result.append(value(variable[f\"x{i}\"]))\n",
+   561→    "result = np.array(result)\n",
+   562→    "\n",
+   563→    "print(result)\n",
+   564→    "# Note that this model size does not count the first and last layer of the network\n",
+   565→    "# In the paper, we manually added this two layers in the final result\n",
+   566→    "print('Model Size:', np.sum(result * parameters * 4 * 4 / 32))\n",
+   567→    "result_4 = (result == 1)\n",
+   568→    "result_8 = (result == 2)\n",
+   569→    "print(\"Bops: \", np.sum(bops_4bit[result_4]) + np.sum(bops_8bit[result_8]))\n",
+   570→    "print(\"Latency: \", np.sum(latency_int4[result_4]) + np.sum(latency_int8[result_8]))"
+   571→   ]
+   572→  },
+   573→  {
+   574→   "cell_type": "code",
+   575→   "execution_count": null,
+   576→   "metadata": {},
+   577→   "outputs": [],
+   578→   "source": []
+   579→  },
+   580→  {
+   581→   "cell_type": "code",
+   582→   "execution_count": null,
+   583→   "metadata": {},
+   584→   "outputs": [],
+   585→   "source": []
+   586→  }
+   587→ ],
+   588→ "metadata": {
+   589→  "kernelspec": {
+   590→   "display_name": "Python 3",
+   591→   "language": "python",
+   592→   "name": "python3"
+   593→  },
+   594→  "language_info": {
+   595→   "codemirror_mode": {
+   596→    "name": "ipython",
+   597→    "version": 3
+   598→   },
+   599→   "file_extension": ".py",
+   600→   "mimetype": "text/x-python",
+   601→   "name": "python",
+   602→   "nbconvert_exporter": "python",
+   603→   "pygments_lexer": "ipython3",
+   604→   "version": "3.8.5"
+   605→  }
+   606→ },
+   607→ "nbformat": 4,
+   608→ "nbformat_minor": 2
+   609→}
+   610→
