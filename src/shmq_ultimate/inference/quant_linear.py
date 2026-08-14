@@ -86,7 +86,7 @@ class SHMQUltimateLinear(nn.Module):
             w8 = self.w8.float().view(self.cout, self.n8 // g, g)
             parts.append((w8 * self.s8.unsqueeze(-1)).view(self.cout, self.n8))
         if self.n4 > 0:
-            w4 = unpack_int4(self.w4, self.n4).float().view(self.cout, self.n4 // g, g)
+            w4 = unpack_int4(self.w4).float().view(self.cout, self.n4 // g, g)
             parts.append((w4 * self.s4.unsqueeze(-1)).view(self.cout, self.n4))
         return torch.cat(parts, dim=1)
 
@@ -111,7 +111,7 @@ class SHMQUltimateLinear(nn.Module):
         if self.n4 > 0:
             xs = xf[:, self.n16 + self.n8 :]
             qx, sx = quantize_activation_per_token(xs, 8)
-            w4 = unpack_int4(self.w4, self.n4).float().view(self.cout, self.n4 // g, g)
+            w4 = unpack_int4(self.w4).float().view(self.cout, self.n4 // g, g)
             qxf = qx.float().view(-1, self.n4 // g, g)
             acc = torch.einsum("mkg,ckg->mck", qxf, w4)
             y += (acc * self.s4.float().unsqueeze(0)).sum(-1) * sx.unsqueeze(1)
