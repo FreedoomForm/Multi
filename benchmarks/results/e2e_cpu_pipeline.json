@@ -1,0 +1,10 @@
+{
+  "model": "tiny-llama-random (4 blocks, hidden 256)",
+  "ppl_fp32": 7975.99658203125,
+  "ppl_shmq_ultimate": 7961.6787109375,
+  "avg_bits": 4.7,
+  "packed_rel_err": 0.012223162688314915,
+  "permuted_layers": 20,
+  "compression_vs_fp16": 0.9014529999011565,
+  "elapsed_s": 12.776034355163574
+}
