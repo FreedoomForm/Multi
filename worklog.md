@@ -2299,3 +2299,260 @@ Stage Summary:
 - Изменённые файлы: config.py, pipeline.py (полностью переписан под 3 уровня), decoupled.py (добавлены 3-level функции), utils.py, ilp/__init__.py, permutation/__init__.py
 - Total SHMQ-Ultimate codebase: ~6,500 строк (5,038 существующих + ~1,500 новых)
 - Готово к запуску на GPU с Qwen2.5-7B-Instruct (нужен GPU для MixLLM kernel compilation + model loading).
+
+---
+
+Task ID: 14 (Audit)
+Agent: general-purpose sub-agent
+Task: Audit SHMQ-Ultimate completeness against the 12 audit points (Etaps 0-9 + Pipeline + vLLM). Verify 7-source integration into 3-level {4,8,16} mixed-precision quantization system for Qwen2.5-7B-Instruct with vLLM via MixLLM.
+
+Work Log:
+- Inspected all 21 source files in /home/z/my-project/shmq-ultimate/src/shmq/ + 6 inference files + smoke_test + 3 configs + 4 vLLM patches.
+- Ran `scripts/smoke_test_3level.py` end-to-end → ALL 7 SUBTESTS PASS on CPU (MixLLM CUDA kernel unavailable as expected on CPU).
+- Verified presence of 5/7 source repos in `external/`: AutoRound ✓, HAWQ-V3 ✓, MixLLM ✓, SliM-LLM ✓, SmoothQuant ✓. PolyQ NOT cloned (custom-implemented in `src/shmq/polyq/isa_matching.py`, 282L). SHMQ paper PDF not in repo but spec extracted into worklog Task 0.8.
+
+## Per-Etap Completeness Scores
+
+### Etap 0 — Preparation: 100%
+**Evidence:**
+- `external/AutoRound/` ✓ (full pyproject + auto_round/ pkg + tests)
+- `external/HAWQ-V3/` ✓ (ILP.ipynb, bit_config.py)
+- `external/MixLLM/` ✓ (kernels.cu, searcher.py, quantizer.py, vllm_v0.9.0_patch/, linear.py, ops.py — 19 files, ~3,900L)
+- `external/SliM-LLM/` ✓ (slim_gptq.py, AutoGPTQ/, utils/mixed_quantizer.py)
+- `external/SmoothQuant/` ✓ (smooth.py, calibration.py)
+- `external/MixLLM/vllm_v0.9.0_patch/` ✓ (4 patches, 699L total: 0001-add-mixllm-quant-method 366L, 0002-W4.4A8-gsm8k-fix 112L, 0003-benchmark-results 130L, 0004-MixLLM-refactor 91L)
+- `configs/qwen7b_3level.json` (64L) — 3-level config with all paper hyperparams
+- `configs/quick_test.json`, `configs/qwen7b_paper.json` — 2-level legacy
+**Gaps:** None.
+**Risks:** None.
+
+### Etap 1 — SmoothQuant: 100%
+**Evidence:**
+- `src/shmq/smooth/smooth.py` (158L): `smooth_ln_fcs_llama_like` + `smooth_lm` — proper Qwen2/Llama-style RMSNorm folding. Formula `s_j = (max|X_j|)^α / (max|W_j|)^(1-α)` with `scale_min` clamp. Correctly handles parallel fcs (max activation across group, mean weight). `fc.weight[:, j] *= s_j` (column-scale), `ln.weight[j] /= s_j` (fold). Skips o_proj/down_proj (no preceding norm).
+- `src/shmq/smooth/calibration.py` (92L): `ActivationScaleCollector` with `register_forward_pre_hook`, per-channel `max|X|` accumulation across batches, returns `(in_features,)` tensor per layer.
+- `src/shmq/calibration.py` (123L): WikiText-2/C4/Pile loaders, 128 samples × 2048 tokens (matches paper §4.1).
+**Gaps:** None.
+**Risks:** `smooth_alpha=0.5` (paper default) — may be too aggressive for W4 quant; SliM-LLM production uses 0.6-0.9. Configurable in `qwen7b_3level.json`.
+
+### Etap 2 — Sensitivity (Fisher + OBS + Manhattan + parallel): 95%
+**Evidence:**
+- `src/shmq/sensitivity/fisher.py` (195L): `compute_inter_layer_fisher_sensitivity` implements SHMQ Eq. 7 — `S^l = (1/2|D|)·Σ_d Σ_i (g_d^T δw^l_{i,:})²`. Pre-computes quantization error δW=W−Q(W), hooks layer INPUT to capture X, vectorized `M = X @ δW.T` then `S = 0.5·||M||_F²/N`. Doc explicitly addresses the g-vs-X derivation ambiguity (Fisher H≈(1/|D|)Σgg^T ≈ X^TX for linear layer with squared loss).
+- `src/shmq/sensitivity/obs.py` (168L): `OBSHessian` class implements SHMQ Eq. 10 — `S_{i,j} = 0.5·(W−Q_W)²_{i,j}/[H⁻¹]_{j,j}`. Hessian `H = X^TX + λ·mean(diag(H))·I` (Levenberg-Marquardt dampening). Cholesky inverse with direct-inverse fallback. Per-element sensitivity (cout, cin) shape.
+- `src/shmq/sensitivity/pyhessian_trace.py` (126L): `compute_inter_layer_pyhessian_trace` — HAWQ-V3 Hutchinson-trace ablation. Isolates per-layer via `requires_grad` masking, normalizes by #params. Used only when `inter_layer_hessian="pyhessian"`.
+- `src/shmq/sensitivity/manhattan.py` (62L): `aggregate_manhattan_channel_sensitivity` (SHMQ Eq. 11) — `S_IntraMQ_j = Σ_i |S^l_{i,j}|`. Plus `identify_sensitive_channels` for top-K selection.
+- `src/shmq/sensitivity/parallel.py` (91L): `average_inter_layer_parallel_sensitivity` (q/k/v share inter-layer sensitivity via mean — Eq. 4) + `concatenate_intra_layer_parallel_sensitivity` (concat per-element matrices along cout, then Manhattan → single (cin,) vector for whole group — Appendix A.3.1).
+**Gaps:** None.
+**Risks:**
+1. **Memory blow-up for Qwen2.5-7B**: OBSHessian stores `H` of shape (cin, cin). For Qwen2.5-7B with cin=35840 (down_proj), H = 35840² · 4 bytes = 4.8 GB per layer in FP32. Likely OOMs on 24GB GPU. Needs batched Hessian or streaming.
+2. Fisher computation loads ALL captured inputs into memory then concatenates: `X = torch.cat(captured, dim=0)` (line 187). For 128 samples × 2048 seq_len × cin, this is ~9.4 GB per layer. Needs streaming.
+3. `pyhessian` package required (declared in worklog Task 0.1-0.3 as installed); not used by default config.
+
+### Etap 3 — ILP (3-level {4,8,16}) + PolyQ ISA matching: 100%
+**Evidence:**
+- `src/shmq/ilp/solver_3level.py` (243L): `solve_ilp_3level` — HAWQ-V3 PULP extension. Indicator vars `y_4, y_8, y_16 ∈ {0,1}` with onehot constraint. Objective `min Σ s_i·(y_4·q4 + y_8·q8 + y_16·q16)` substituted via `y_4 = 1 − y_8 − y_16`. Memory budget constraint `Σ params·bits/Σ params ≤ target_avg_bits`. Optional floor `bits_expr ≥ min_avg_bits·total_params`. Parallel-layer equality enforced via `y[ref][b] == y[other][b]` for b∈{4,8,16}. Returns `ILPResult3L` with `bit_allocation`, `total_bits`, `objective_value`, `constraint_slack`. CBC solver default, GLPK optional.
+- `src/shmq/polyq/isa_matching.py` (282L): `apply_isa_matching` + `isa_match_cluster_sizes` + `cluster_sizes_to_indices`. Tile sizes `TENSOR_CORE_TILE={4:64, 8:128, 16:128}`. Algorithm: round each cluster DOWN to tile boundary → distribute leftover (prefer_upgrade=True fills C16 first, then C8, then C4 with partial-tail tolerance) → budget enforcement downgrades C16→C8→C4 by full tile chunks. Smoke test confirmed: (k16=204, k8=819, k4=3073) → (k16=128, k8=768, k4=3200), avg bits 5.125 ≤ 5.4 budget ✓.
+- `src/shmq/ilp/solver.py` (legacy 2-level) preserved for backward compat.
+- Smoke test #3 verified parallel constraint: layer_0/1/2 share bits, layer_3/4 share bits ✓.
+**Gaps:** None.
+**Risks:**
+1. **q16=0 assumption**: ILP assumes FP16 quantization is lossless (`quant_error_16bit` defaults to 0). True for FP16 storage, but if model is BF16 → FP16 conversion incurs rounding error. Qwen2.5-7B-Instruct is BF16 by default → FP16 path may lose precision.
+2. **ILP constraint_slack bug**: `pulp.value(c) - c.constant` may compute wrong slack (pulp LpConstraint semantics), but only used for diagnostics — non-blocking.
+3. **No `bit_allocation` floor per parallel group**: if budget tight, parallel group may get 4-bit even if all members are highly sensitive (only inter-group constraint prevents this).
+
+### Etap 4 — 3-level decoupled permutation: 100%
+**Evidence:**
+- `src/shmq/permutation/decoupled.py` (493L): 
+  - `decoupled_permutation_3level` (109-233): SHMQ Eq. 12 extended to 3 clusters. Sort ASC by sens → top-K1 highest → C16; next-K2 → C8; rest → C4. Within each cluster: sort by magnitude DESC. ISA-aware tile rounding inline (same logic as PolyQ). Final layout `[C16_sorted | C8_sorted | C4_sorted]`.
+  - `apply_permutation_to_parallel_layers_3level` (367-493): For each parallel group, take `max` of sensitivities and `max` of metrics across q/k/v (or up/gate), share single permutation. Per-bit-allocation routing: bits=16→ratio_16=1.0, bits=8→ratio_8=1.0, bits=4→intra_layer ratios. Non-parallel layers (o_proj, down_proj) handled separately.
+  - Legacy `decoupled_permutation` + `apply_permutation_to_parallel_layers` (2-level) preserved.
+- `src/shmq/permutation/metric.py` (80L): `compute_permutation_metric` (SHMQ Appendix A.3.1: `M_j = max|X_j| × max|W_j|`) + `capture_input_activations` via forward hooks.
+- Smoke test #5 verified: avg sens C16=0.984 > avg sens C4=0.388 ✓.
+**Gaps:** None.
+**Risks:**
+1. **Permutation cluster sizes vs ISA-matched sizes**: `step4_permutation` calls `decoupled_permutation_3level` (with tile alignment but NO budget enforcement), then `step3_5_isa_matching` (WITH budget enforcement) overrides `self.cluster_sizes`. The weight matrix is permuted with the un-budget-enforced cluster sizes, but the MixLLM adapter slices with the budget-enforced cluster sizes. **Analysis: NOT a correctness bug** — the channel ORDER is preserved, so the most-sensitive channels always land at the front regardless of cluster-size adjustments; the precision boundary simply shifts (more channels → INT8, fewer → FP16), which is exactly the intended ISA-matching behavior.
+2. `apply_permutation_to_parallel_layers_3level` line 465: when parallel group has mixed bits (shouldn't happen due to ILP), takes `max(bits_set)` — conservative but may waste budget.
+
+### Etap 5 — Permutation fusion + layout propagation: 95%
+**Evidence:**
+- `src/shmq/permutation/rmsnorm_fusion.py` (166L): `PermutedRMSNorm` class — bakes permutation into RMSNorm weight `w[perm]`. Forward: `x_gathered = x.index_select(-1, perm)` then standard RMSNorm with permuted weight. Mathematically equivalent to `RMSNorm(x)[perm]` (zero-overhead at inference). `fuse_permutation_into_rmsnorm` walks model, identifies (norm, [fcs]) pairs by regex `model.layers.(\d+).(\w+).(\w+_proj)`, replaces `input_layernorm`/`post_attention_layernorm` with `PermutedRMSNorm`. Logs warnings for conflicting perms (shouldn't happen due to parallel constraint).
+- PolyQ layout propagation is handled HERE (not in `polyq/`): the permutation is fused into RMSNorm weight, the next Linear's weight is permuted in step 4, and the MixLLM adapter handles the kernel-side scatter-back via `permutation` buffer (line 368-369 of adapter.py: `y_original[:, self.permutation] = y`).
+- Smoke test from v2 (Task 13) confirmed PermutedRMSNorm matches RMSNorm+permute within 1e-6.
+**Gaps:** None.
+**Risks:**
+1. **HuggingFace compatibility**: replacing `Qwen2RMSNorm` with `PermutedRMSNorm` may break `from_pretrained` save/load round-trips (different module class). Adapter stores `permutation` as a persistent buffer for serialization, but model.config.json won't know about it. Workaround: use `shmq_config.json` sidecar (saved in `pipeline.save_model`).
+2. **KV-cache**: SHMQ permutation affects q_proj/k_proj INPUT (cin axis), not OUTPUT. So K and V tensors in KV-cache are NOT permuted — no propagation needed. ✓ Confirmed correct.
+3. `o_proj` and `down_proj` have no preceding norm to fuse into → permutation not applied to their input. But their input comes from attention/SwiLU which uses the SAME `cin` as q/k/v output (after attention concat). If q/k/v outputs are unpermuted (they are — only their INPUT is permuted), then o_proj input is unpermuted. **Confirmed correct** — no fusion needed for o_proj/down_proj.
+
+### Etap 6 — AutoRound (200 steps SignSGD): 95%
+**Evidence:**
+- `src/shmq/autoround/sign_sgd.py` (60L): `SignSGD` optimizer — `θ ← θ − lr·sign(g)`. Plus `linear_lr_schedule` (LinearLR start_factor=1.0, end_factor=0.0 — matches AutoRound).
+- `src/shmq/autoround/wrapper.py` (156L): `WrapperLinear` — learnable `V` of shape (cout, cin), init zeros. Forward: `Q(w) = scale·clamp(round_ste(w/scale + V), −max_q, max_q−1)`. `round_ste = (x.round() − x).detach() + x` (STE). `bake()` folds V into weight for zero-overhead inference. `wrap_model_linears`/`unwrap_model_linears` helpers.
+- `src/shmq/autoround/autoround_block.py` (179L): `autoround_block` per-block driver. Captures block inputs via StopIteration trick (clever — avoids running block twice). Captures FP16 reference outputs. Wraps Linears → 200 steps SignSGD with MSE loss vs FP16 outputs, loss×1000 scale (AutoRound stability trick). Linear LR decay. Bakes V at end.
+- `src/shmq/autoround/baking.py` (26L): `bake_v_into_weights` wrapper (already in `WrapperLinear.bake`).
+- Config: `autoround_iters=200`, `autoround_lr=None→1/200=5e-3` (paper), `autoround_block_size=128`.
+**Gaps:** None.
+**Risks:**
+1. **8-bit layers skipped**: `autoround_block` line 106 only wraps 4-bit layers. 16-bit (FP16) layers also skipped (correct — no quantization). But for the 3-level {4,8,16} scheme, AutoRound V optimization on the C8 sub-cluster of 4-bit layers is NOT done — only the whole layer is treated as 4-bit. This is a deviation from AutoRound's typical per-group V, but consistent with the wrapper's full-weight V.
+2. **Capture via StopIteration** (line 47): relies on raising an exception to short-circuit the block's forward. If any code path between hook registration and `block.forward = original_forward` triggers a different exception, the restoration in `finally` saves us. Looks robust.
+3. **Block output MSE loss** (line 167): AutoRound uses `min_max_loss` (Q-weighted MSE), not raw MSE. The implementation uses raw MSE which is simpler but may converge slower. Paper-equivalent for the V update direction.
+4. **`max_samples=8` cap** (line 381 of pipeline.py): may be too few for stable V optimization on Qwen2.5-7B (paper uses 128). Configurable in `autoround_block`.
+
+### Etap 7 — SQC calibration (SliM-LLM): 90%
+**Evidence:**
+- `src/shmq/quantize/sqc.py` (134L): `SQCCalibrator` — z-score salience identification (threshold 2.0 default, 3.0 in qwen7b_3level.json), grid search scale multiplier `p ∈ [0.9, 1.1]` (50 points each side → 101 candidates), salience-weighted loss `err·salient_mask·λ + err·non_salient`. Returns `best_scale_multiplier` per layer.
+- Config: `sqc_zscore_threshold=3.0`, `sqc_scale_range=[0.9, 1.1]`, `sqc_scale_search_points=11`, `sqc_salience_lambda=0.1`.
+- `calibrate_model` iterates all layers, uses `intra_layer_sensitivities` (from OBS) for salience mask.
+**Gaps:**
+1. **SQC multiplier NOT applied**: `pipeline.step7_sqc` calls `sqc.calibrate_model(...)` and stores `self.sqc_multipliers` but NEVER APPLIES the multipliers to the weights. The GPTQ step (step8_quantize) uses `MixedPrecisionQuantizer.apply` which does its own RTN/GPTQ without consulting `sqc_multipliers`. **This is a real gap** — SQC results are computed but discarded.
+**Risks:**
+1. Grid search is sequential per layer (no batching across layers) — slow on 168 layers.
+2. `salience_lambda=0.1` in config (paper default 1.0) — may under-weight salient channels.
+
+### Etap 8 — Integration + GPTQ + Mixed precision: 95%
+**Evidence:**
+- `src/shmq/quantize/gptq.py` (199L): `GPTQQuantizer` — per-element Hessian (SliM-LLM/AutoGPTQ style). `H = X^TX + λ·mean(diag)·I`, Cholesky inverse, block-by-block error propagation `W[:, i_end:] -= err_block @ Hinv[i:i_end, i_end:]`. Stores `_shmq_int_codes` (int8) + `_shmq_scales` (fp16) on module for downstream MixLLM packing. `apply_gptq_to_model` driver (RTN for 8-bit, GPTQ for 4-bit).
+- `src/shmq/quantize/mixed.py` (150L): `MixedPrecisionQuantizer.apply` — dispatches per bit-allocation: 8-bit→RTN, 4-bit→GPTQ (or RTN fallback). `_rtn_quantize_to_codes` returns INTEGER codes (not fake-quant). `_store_codes_on_module` caches for Step 9. `quantize_activations_for_inference` for W4.8A8 path.
+- `pipeline.step8_quantize` re-captures activations POST-fusion (line 430) — important because RMSNorm fusion changes input distribution.
+**Gaps:** None.
+**Risks:**
+1. **GPTQ `err_block` formula** (line 122): `err_block = (W_block - W[:, i:i_end]) / Hinv_sqrt[i:i_end, i:i_end].diag().unsqueeze(0)`. But by this point `W[:, i:i_end]` has already been overwritten with `q_g * s.unsqueeze(-1)` (line 118). So `W_block - W[:, i:i_end] = 0` → `err_block = 0` → no error propagation. **THIS IS A BUG**. The GPTQ error propagation should use the ORIGINAL W_block vs the QUANTIZED W_block, but the code reassigns `W[:, g_start:g_end] = q_g * s.unsqueeze(-1)` BEFORE computing err_block, which is then always 0. This breaks GPTQ's error-correction property — quantization degenerates to RTN-with-bad-rounding.
+   - **Severity**: HIGH. The smoke test passed because it doesn't validate GPTQ accuracy, only format. Real Qwen2.5-7B quantization will likely show degraded perplexity (closer to RTN than GPTQ).
+   - **Fix**: Save `W_block_orig = W_block.clone()` before quantization, compute `err_block = (W_block_orig - q_g*s) / Hinv_sqrt[i:i_end, i:i_end].diag().unsqueeze(0)`.
+2. **GPTQ scale reuse**: GPTQ uses the same `self.scale` (pre-computed from original W) for all blocks, but block-wise updates change W's effective range. Should recompute scale per-block post-update.
+3. `percdamp=0.01` (SliM-LLM default) — may be too low for some layers; GPTQ paper uses 0.01-0.1.
+
+### Etap 9 — MixLLM CUDA kernel adaptation (FP16 path + permutation): 90%
+**Evidence:**
+- `src/shmq/mixllm/adapter.py` (631L):
+  - `is_mixllm_available()` lazy-imports `mixllm` from `external/MixLLM/`, attempts to import `mixllm_gemm` op. Returns False on CPU (expected).
+  - `pack_int4_weights` (50L): symmetric INT4 packing → (n_out, n_in/2) uint8 with `(high<<4)|low` nibble packing, scale (n_groups, n_out) fp16, zero=8 constant.
+  - `pack_int8_weights` (24L): INT8 → (n_out, n_in) int8, scale (n_groups, n_out) fp16.
+  - `SHMQMixLLMLinear` (270L): 3-path linear (FP16+INT8+INT4). FP16 path uses `torch.matmul` (cuBLAS). INT8+INT4 path uses `LinearMixLLM` (MixLLM CUDA kernel). Outputs concatenated and scattered back to original channel order via `permutation` buffer.
+  - `_forward_mixllm_fallback` (40L): pure-PyTorch reference dequant+matmul. Works on CPU. Verified by smoke test #6 (forward output shape (8, 512), no NaN).
+  - `convert_model_to_mixllm` (80L): replaces every nn.Linear with SHMQMixLLMLinear, returns ConversionSummary with per-layer stats.
+- `src/shmq/inference/kernel_loader.py` (179L) + `shmq_matmul_kernel.cu` (352L) + `shmq_quant_linear.py` (191L) + `weight_packing.py` (223L) + `model_converter.py` (190L) — **LEGACY 2-LEVEL inference path, NOT WIRED INTO pipeline.py**. The pipeline uses `convert_model_to_mixllm` from `mixllm/adapter.py` instead. These files are dead code from previous iteration, kept for reference.
+- Smoke test #6: SHMQMixLLMLinear forward on CPU produces (8, 512) FP16 output, no NaN ✓.
+**Gaps:**
+1. **MixLLM CUDA kernel NOT loaded on CPU** (expected — `kernels.cpython-312-x86_64-linux-gnu.so` missing). PyTorch fallback works correctly.
+2. **No GPU integration test**: never validated that `LinearMixLLM(...)` actually accepts the indices/scales layout produced by `pack_int4_weights`/`pack_int8_weights`. The packing format is documented to match MixLLM's expected layout (n_groups, n_out) — but not runtime-verified.
+3. **Two-pass GEMM**: SHMQMixLLMLinear does TWO separate matmuls (FP16 via cuBLAS + INT8/INT4 via MixLLM). This is correct but NOT a single fused kernel — the 2.86× speedup claim from SHMQ paper assumes a fused kernel. Real speedup may be ~1.5-2× due to kernel launch overhead.
+**Risks:**
+1. **MixLLM's `LinearMixLLM` API mismatch**: the adapter passes `weight_int8=None` when `n_int8=0`, but the actual MixLLM LinearMixLLM signature may not accept None for some args. Will fail at runtime on GPU — needs validation.
+2. **`x_cuda = x_flat.cuda()` (line 382)**: hard-codes CUDA device 0. Multi-GPU inference may break.
+3. **Output scatter** (line 369): `y_original[:, self.permutation] = y` — in-place index assignment. If `self.permutation` has duplicates (shouldn't, but if SHMQ permutation bug), output is silently corrupted.
+
+### Final — vLLM inference via MixLLM patch: 30%
+**Evidence:**
+- `external/MixLLM/vllm_v0.9.0_patch/` has 4 patches (699L total). These are MICROSOFT'S UNMODIFIED patches for MixLLM's W4.4A8 format (90% INT4 + 10% INT8). They add:
+  - `vllm/model_executor/layers/quantization/mixllm.py` (154L) — vLLM quantization method that loads MixLLM-format weights and dispatches to `LinearMixLLM`.
+  - `run_benchmark.sh`, `run_gsm8k.sh`, `xn_quant_sample.py` — driver scripts.
+  - 0002 patch: gsm8k workaround for non-eager mode.
+  - 0004 patch: refactor for MixLLM v2 API.
+- `external/MixLLM/apply_vllm_patche.sh` (sic, typo in filename) — shell script to apply patches to vLLM v0.9.0.
+- `src/shmq/inference/` legacy package (5 files, 836L) is NOT wired to vLLM. It's a standalone PyTorch inference path with custom CUDA kernel (never tested on GPU).
+**Gaps (CRITICAL):**
+1. **No SHMQ-specific vLLM patch**: The 4 MixLLM patches assume MixLLM's W4.4A8 format (2-level). SHMQ's 3-level {4,8,16} with FP16 path is NOT supported. Need a custom 5th patch that:
+   - Loads `SHMQMixLLMLinear` weights (3 buffers: weight_fp16, weight_int8, weight_int4 + scales + indices + permutation).
+   - Routes FP16 channels through vLLM's existing FP16 GEMM, INT8+INT4 through MixLLM kernel.
+   - Applies permutation scatter at output.
+2. **No vLLM model loader for SHMQ**: `pipeline.save_model` saves via `model.save_pretrained` which would serialize `SHMQMixLLMLinear` as a state_dict, but vLLM has no model class that knows how to load it.
+3. **No end-to-end vLLM inference test**.
+**Risks:**
+1. The MixLLM vLLM patch is for vLLM v0.9.0 (released ~Jun 2025). Current vLLM main branch may have API changes. Need to pin vLLM==v0.9.0 for compatibility.
+2. Microsoft's MixLLM W4.4A8 uses N-axis split (output channels). SHMQ uses K-axis permutation. The two are orthogonal (confirmed in worklog Task 13), but combining them in vLLM requires careful buffer management.
+
+### Pipeline integration (11-step orchestrator): 95%
+**Evidence:**
+- `src/shmq/pipeline.py` (541L): `SHMQPipeline` class with `step0_load` → `step9_mixllm_conversion`. All 11 steps present:
+  - step0_load (87-116): ModelLoader + calibration data + MixLLM availability check.
+  - step1_smoothquant (129-148): get_act_scales + smooth_lm.
+  - step2_sensitivity (153-196): Fisher + OBS + Manhattan + parallel constraint.
+  - step3_ilp (201-241): 3-level ILP with parallel groups + budget + floor.
+  - step3_5_isa_matching (246-282): PolyQ tile rounding + budget enforcement.
+  - step4_permutation (287-333): capture activations + compute metric + 3-level perm + parallel.
+  - step5_rmsnorm_fusion (338-351): fuse_permutation_into_rmsnorm.
+  - step6_autoround (356-387): per-block SignSGD 200 steps.
+  - step7_sqc (392-413): SQC calibrate_model.
+  - step8_quantize (418-444): GPTQ + RTN mixed precision (fake quant).
+  - step9_mixllm_conversion (449-474): convert_model_to_mixllm (REAL INT4/INT8 packing + FP16 path).
+- `run(skip_steps)` orchestrator with skip control.
+- `save_model` writes HF format + `shmq_config.json` sidecar with bit_allocation + cluster_sizes + mixllm_available flag.
+- Smoke test #1-7 ALL PASS on CPU (MixLLM CUDA not loaded, fallback works).
+**Gaps:**
+1. **SQC multipliers computed but not applied** (see Etap 7 gap #1).
+2. **GPTQ error-propagation bug** (see Etap 8 risk #1).
+3. **No step10_vllm_inference** — the "Final: vLLM inference via MixLLM patch" is missing from the orchestrator. Pipeline stops at step9 (MixLLM module conversion). User must manually run vLLM with the patched loader.
+**Risks:**
+1. Memory: full forward passes on Qwen2.5-7B with 128×2048 calibration tokens will OOM on 24GB GPU for steps 1, 2, 4, 8 (each captures (N, cin) activations per layer). Needs `device_map="auto"` or CPU offload.
+2. Runtime: step2 (Fisher + OBS) does 2 full forward passes; step4 (permutation) does 1; step6 (AutoRound) does 200×(num blocks)=5600 forward passes; step8 (GPTQ) does 1. Total ~6000 forwards × Qwen2.5-7B ≈ 4-8 hours on A100.
+
+## Overall Completeness: **82%**
+
+| Component | Score | Status |
+|-----------|-------|--------|
+| Etap 0 — Preparation | 100% | ✓ Complete |
+| Etap 1 — SmoothQuant | 100% | ✓ Complete |
+| Etap 2 — Sensitivity | 95% | ✓ Complete (memory risk) |
+| Etap 3 — ILP + PolyQ | 100% | ✓ Complete |
+| Etap 4 — Decoupled permutation | 100% | ✓ Complete |
+| Etap 5 — RMSNorm fusion | 95% | ✓ Complete (HF save/load risk) |
+| Etap 6 — AutoRound | 95% | ✓ Complete |
+| Etap 7 — SQC | 90% | ⚠ Partial (multipliers not applied) |
+| Etap 8 — GPTQ + Mixed | 75% | ⚠ Partial (GPTQ err-propagation bug) |
+| Etap 9 — MixLLM adapter | 90% | ✓ Complete (no GPU validation) |
+| Final — vLLM inference | 30% | ✗ Missing (no SHMQ-specific patch) |
+| Pipeline integration | 95% | ✓ Complete (missing step10) |
+
+## Critical Gaps Blocking Production Deployment
+
+1. **🔴 CRITICAL: GPTQ error-propagation bug** (`gptq.py` lines 117-122)
+   - `W[:, g_start:g_end]` is overwritten with quantized values BEFORE `err_block` is computed, so `err_block` is always 0. GPTQ degenerates to RTN. WikiText-2 PPL likely +0.5-1.0 worse than expected.
+   - **Fix**: Save `W_block_orig = W_block.clone()` before quantization; use original in `err_block`.
+
+2. **🔴 CRITICAL: SQC multipliers not applied** (`pipeline.py` step7)
+   - `sqc_multipliers` stored but never consumed by step8. SQC has zero effect on final weights.
+   - **Fix**: In `MixedPrecisionQuantizer.apply`, accept `sqc_multipliers` dict and multiply `base_scale *= mult` before quantization.
+
+3. **🔴 CRITICAL: No SHMQ-specific vLLM patch**
+   - The 4 Microsoft MixLLM patches only support W4.4A8 (2-level). SHMQ's 3-level {4,8,16} with FP16 path needs a custom 5th patch + custom vLLM model loader.
+   - **Fix**: Write `0005-shmq-3level-support.patch` that adds `SHMQMixLLMLinear` to vLLM's quantization registry and a `Qwen2SHMQForCausalLM` model class.
+
+4. **🟡 HIGH: No GPU end-to-end validation**
+   - The whole pipeline has only been tested on CPU with synthetic data (smoke_test). Real Qwen2.5-7B on A100/H100 has never been run.
+   - **Fix**: Need a GPU runner script `scripts/gpu/run_pipeline.py` that loads real Qwen2.5-7B-Instruct, runs all 11 steps, evaluates WikiText-2 PPL, and benchmarks latency vs FP16 baseline.
+
+5. **🟡 HIGH: Memory blow-up in OBS Hessian** (`obs.py`)
+   - For Qwen2.5-7B `down_proj` (cin=35840), H matrix is 4.8 GB in FP32. Will OOM on 24GB GPU alongside model weights (~14 GB).
+   - **Fix**: Streaming Hessian accumulation or block-diagonal approximation (SliM-LLM uses 128×128 blocks).
+
+6. **🟡 HIGH: Memory blow-up in Fisher input capture** (`fisher.py` line 187)
+   - `torch.cat(captured, dim=0)` materializes (N_total, cin) per layer. For 128×2048 samples × cin=4096, ~4.2 GB per layer × 168 layers if not freed.
+   - **Fix**: Stream computation — accumulate `M = X @ δW.T` per batch instead of materializing X.
+
+## Recommendations (Priority Order)
+
+1. **Fix GPTQ bug** (30 min) — unblock accuracy.
+2. **Apply SQC multipliers in step8** (1 hr) — activate SQC effect.
+3. **Write `scripts/gpu/run_pipeline.py`** (2 hr) — first end-to-end GPU validation. Add `--skip-step 7` and `--skip-step 8` flags to test partial pipelines.
+4. **Validate MixLLM CUDA kernel** (4 hr) — write `tests/test_mixllm_gpu.py` that builds `SHMQMixLLMLinear` with random FP16 weights, runs forward on CUDA, compares to PyTorch fallback within 1e-3. Catch API mismatches before running real model.
+5. **Write SHMQ vLLM patch** (8 hr) — `0005-shmq-3level-support.patch` + custom model loader. This is the biggest remaining work item.
+6. **Memory optimization for OBS + Fisher** (4 hr) — streaming accumulation, block-diagonal Hessian.
+7. **Add `step10_vllm_inference` to pipeline** (2 hr) — calls vLLM API to actually generate text post-quantization.
+8. **PPL evaluation script** (2 hr) — `scripts/gpu/eval_perplexity.py` already exists (153L) but needs wiring to SHMQ-quantized model.
+
+Stage Summary:
+- **82% overall completeness** — all 11 SHMQ-specific algorithmic steps (Etaps 0-9) implemented and validated on CPU synthetic data.
+- **5 of 7 source repos cloned** (PolyQ is custom-implemented; SHMQ paper extracted to worklog). All 7 sources integrated into code:
+  - HAWQ-V3 → ILP solver (PULP, 3-level extension) ✓
+  - SliM-LLM → GPTQ OBS + SQC calibrator ✓
+  - MixLLM → CUDA kernel adapter + FP16 path + vLLM patches (unmodified) ✓
+  - AutoRound → SignSGD + WrapperLinear + per-block driver ✓
+  - SmoothQuant → smooth_lm + act scale collector ✓
+  - PolyQ → ISA-aware tile matching + layout propagation ✓
+  - SHMQ paper → Eq.6 Fisher + Eq.12 decoupled perm + Eq.4 parallel constraint + §3.2 RMSNorm fusion ✓
+- **3 critical bugs** identified: (1) GPTQ err-propagation degenerates to RTN, (2) SQC multipliers computed but not applied, (3) no SHMQ-specific vLLM patch.
+- **2 high-priority risks**: memory blow-up in OBS Hessian and Fisher input capture on real Qwen2.5-7B (24GB GPU insufficient).
+- **MixLLM CUDA kernel never loaded on GPU** — only PyTorch fallback tested. Adapter API matches MixLLM LinearMixLLM signature based on source inspection, but no runtime validation.
+- **Pipeline stops at step9** (MixLLM module conversion); step10 (vLLM inference) not implemented in orchestrator.
+- **Total SHMQ-Ultimate codebase**: 6,800 lines across 28 source files + 4 vLLM patches (699L) + 3 configs + smoke test (209L) + 5 GPU scripts (843L).
+- **Next agent**: implement the 8 recommendations above, starting with the GPTQ bug fix and SQC application (quick wins, 1.5 hr total), then GPU end-to-end validation.

@@ -1,0 +1,632 @@
+     1→"""MixLLM adapter for SHMQ-Ultimate 3-level {4, 8, 16} quantization.
+     2→
+     3→This module wraps Microsoft's MixLLM CUDA kernel
+     4→(https://github.com/microsoft/MixLLM) and extends it with an FP16 path
+     5→for the new {16, 8, 4} 3-level scheme.
+     6→
+     7→Key design
+     8→-----------
+     9→MixLLM's `LinearMixLLM` natively supports mixed INT4/INT8 in a single
+    10→linear layer via two parallel channel-index arrays:
+    11→    * `indices_int8` — output channels quantized to INT8
+    12→    * `indices_int4` — output channels quantized to INT4
+    13→The kernel itself uses these indices to scatter outputs back to their
+    14→original positions, which means SHMQ's decoupled permutation is
+    15→**natively compatible** with MixLLM — we just feed the permuted channel
+    16→indices directly.
+    17→
+    18→For 3-level {4, 8, 16}:
+    19→    * C16 (FP16) channels are routed through a standard cuBLAS GEMM
+    20→      (torch.matmul), since MixLLM has no FP16 weight path.
+    21→    * C8 + C4 channels go through MixLLM's mixed-precision kernel.
+    22→    * The two partial outputs are summed.
+    23→
+    24→This avoids modifying MixLLM's CUDA kernel source — we treat it as a
+    25→black box and add a Python-side FP16 path around it.
+    26→
+    27→For SHMQ, since SHMQ's decoupled permutation already ensures that
+    28→sensitive channels (C16, C8) and insensitive channels (C4) are
+    29→CONTIGUOUS in the permuted order, the FP16/INT8/INT4 channel sets are
+    30→also contiguous, which is what MixLLM's kernel expects.
+    31→"""
+    32→from __future__ import annotations
+    33→from dataclasses import dataclass, field
+    34→from typing import Dict, List, Optional, Tuple
+    35→import logging
+    36→import os
+    37→import sys
+    38→import torch
+    39→import torch.nn as nn
+    40→
+    41→logger = logging.getLogger("shmq")
+    42→
+    43→# Lazy import of MixLLM (the package may not be installed in all environments)
+    44→_MIXLLM_AVAILABLE: Optional[bool] = None
+    45→
+    46→
+    47→def is_mixllm_available() -> bool:
+    48→    """Check whether MixLLM (with compiled CUDA kernel) is importable."""
+    49→    global _MIXLLM_AVAILABLE
+    50→    if _MIXLLM_AVAILABLE is not None:
+    51→        return _MIXLLM_AVAILABLE
+    52→    try:
+    53→        # Make sure external/MixLLM is on PYTHONPATH if it was not pip-installed
+    54→        external_mixllm = os.path.join(
+    55→            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    56→                os.path.abspath(__file__))))),
+    57→            "external", "MixLLM",
+    58→        )
+    59→        if os.path.isdir(external_mixllm) and external_mixllm not in sys.path:
+    60→            sys.path.insert(0, external_mixllm)
+    61→        import mixllm  # noqa: F401
+    62→        from mixllm.nn.modules.ops import mixllm_gemm  # noqa: F401
+    63→        _MIXLLM_AVAILABLE = True
+    64→        logger.info("[mixllm] MixLLM package is available.")
+    65→    except Exception as e:
+    66→        _MIXLLM_AVAILABLE = False
+    67→        logger.warning(f"[mixllm] MixLLM not available: {e}")
+    68→    return _MIXLLM_AVAILABLE
+    69→
+    70→
+    71→def _import_mixllm_ops():
+    72→    """Import the mixllm ops module (assumes is_mixllm_available() == True)."""
+    73→    from mixllm.nn.modules import ops as mixllm_ops
+    74→    return mixllm_ops
+    75→
+    76→
+    77→# ----------------------------------------------------------------------
+    78→# Weight packing helpers
+    79→# ----------------------------------------------------------------------
+    80→
+    81→def pack_int4_weights(weight_fp16: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    82→    """Pack a (k, n) FP16 weight tensor into MixLLM's INT4 format.
+    83→
+    84→    MixLLM expects:
+    85→        weight_int4   : (k, n//2) uint8 (two INT4 values per byte, row-major)
+    86→                        where k = n_out_channels, n = in_features
+    87→        weight_scale  : (n // 128, k) fp16 (per-group-of-128 input channels,
+    88→                                             one scale per output channel per group)
+    89→        weight_zero   : (n // 128, k) uint8 (asymmetric zero points)
+    90→
+    91→    For SHMQ we use SYMMETRIC INT4 quantization (zero=8, range [-7, 7]),
+    92→    so weight_zero is constant 8. We keep the asymmetric interface for
+    93→    MixLLM compatibility.
+    94→
+    95→    Args:
+    96→        weight_fp16: (out_features, in_features) FP16/BF16 weight tensor.
+    97→
+    98→    Returns:
+    99→        (weight_int4, weight_scale, weight_zero) — all on the same device
+   100→        as `weight_fp16`.
+   101→    """
+   102→    assert weight_fp16.dim() == 2, f"Expected 2D weight, got {weight_fp16.dim()}D"
+   103→    n_out, n_in = weight_fp16.shape
+   104→    assert n_in % 128 == 0, f"in_features={n_in} must be divisible by 128 (group_size)"
+   105→    device = weight_fp16.device
+   106→
+   107→    # Reshape to (n_in // 128, 128, n_out) for per-group scaling
+   108→    w = weight_fp16.float().t().reshape(n_in // 128, 128, n_out)
+   109→    # Per-group scale = max(|w|) / 7  (symmetric INT4 range = [-7, 7])
+   110→    group_max = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-8)  # (n_in//128, 1, n_out)
+   111→    scale = (group_max / 7.0).squeeze(1)  # (n_in//128, n_out) = (n_groups, n_out)
+   112→    # Quantize: round(w / scale), clip to [-8, 7] (INT4 uses [-8, 7] to be safe)
+   113→    q = torch.round(w / scale.unsqueeze(1)).clamp(-8, 7)
+   114→    # Convert to uint8 representation: add 8 to shift to [0, 15]
+   115→    q_uint = (q + 8).to(torch.uint8)  # (n_in//128, 128, n_out)
+   116→    # Reshape back to (n_in, n_out) then transpose to (n_out, n_in)
+   117→    q_uint = q_uint.reshape(n_in, n_out).t().contiguous()  # (n_out, n_in)
+   118→    # Pack two INT4 values into one uint8 byte (little-endian: low nibble first)
+   119→    assert q_uint.shape[1] % 2 == 0, "in_features must be even for INT4 packing"
+   120→    low  = q_uint[:, 0::2]
+   121→    high = q_uint[:, 1::2]
+   122→    packed = (high << 4) | low  # (n_out, n_in // 2)
+   123→
+   124→    # MixLLM convention: scale shape = (n_groups, n_out_channels)
+   125→    weight_scale = scale.contiguous().to(torch.float16)  # (n_groups, n_out)
+   126→    # Zero points: constant 8 (symmetric INT4) — shape (n_groups, n_out)
+   127→    weight_zero = torch.full_like(weight_scale, 8, dtype=torch.uint8)
+   128→
+   129→    return packed, weight_scale, weight_zero
+   130→
+   131→
+   132→def pack_int8_weights(weight_fp16: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+   133→    """Pack a (k, n) FP16 weight tensor into MixLLM's INT8 format.
+   134→
+   135→    MixLLM expects:
+   136→        weight_int8  : (k, n) int8  (k = n_out_channels, n = in_features)
+   137→        weight_scale : (n // 128, k) fp16  (per-group-of-128 input channels,
+   138→                                            one scale per output channel per group)
+   139→
+   140→    Returns:
+   141→        (weight_int8, weight_scale) — both on the same device as `weight_fp16`.
+   142→    """
+   143→    n_out, n_in = weight_fp16.shape
+   144→    assert n_in % 128 == 0, f"in_features={n_in} must be divisible by 128 (group_size)"
+   145→    device = weight_fp16.device
+   146→
+   147→    # Reshape to (n_in // 128, 128, n_out) for per-group scaling
+   148→    w = weight_fp16.float().t().reshape(n_in // 128, 128, n_out)
+   149→    group_max = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-8)  # (n_in//128, 1, n_out)
+   150→    scale = (group_max / 127.0).squeeze(1)  # (n_in//128, n_out) = (n_groups, n_out)
+   151→    q = torch.round(w / scale.unsqueeze(1)).clamp(-128, 127).to(torch.int8)
+   152→    q = q.reshape(n_in, n_out).t().contiguous()  # (n_out, n_in)
+   153→    # MixLLM convention: scale shape = (n_groups, n_out_channels)
+   154→    weight_scale = scale.contiguous().to(torch.float16)  # (n_groups, n_out)
+   155→    return q, weight_scale
+   156→
+   157→
+   158→# ----------------------------------------------------------------------
+   159→# Linear module wrapping MixLLM + FP16 path
+   160→# ----------------------------------------------------------------------
+   161→
+   162→@dataclass
+   163→class SHMQMixLLMConfig:
+   164→    """Configuration for the SHMQMixLLMLinear module."""
+   165→    in_features: int
+   166→    out_features: int
+   167→    n_fp16_channels: int = 0
+   168→    n_int8_channels: int = 0
+   169→    n_int4_channels: int = 0
+   170→    group_size: int = 128
+   171→    bias: bool = False
+   172→    # Original channel order (after permutation, indices into the ORIGINAL
+   173→    # weight rows). If None, identity permutation is used.
+   174→    permutation: Optional[torch.Tensor] = None
+   175→
+   176→
+   177→class SHMQMixLLMLinear(nn.Module):
+   178→    """Linear layer that combines FP16 + INT8 + INT4 weight paths.
+   179→
+   180→    Weight layout (after permutation):
+   181→        [ FP16 channels | INT8 channels | INT4 channels ]
+   182→
+   183→    The first `n_fp16_channels` rows are kept in FP16 and multiplied via
+   184→    torch.matmul (cuBLAS). The next `n_int8_channels` rows are quantized
+   185→    to INT8, the last `n_int4_channels` rows to INT4, and both go through
+   186→    MixLLM's mixed-precision GEMM kernel.
+   187→
+   188→    The forward pass:
+   189→        y = x @ W_fp16.T  +  MixLLM_gemm(x_int8, W_int8, W_int4, indices)
+   190→
+   191→    where `x_int8` is the per-group INT8 quantized activation (MixLLM
+   192→    handles this internally).
+   193→
+   194→    If MixLLM is not available (e.g. on CPU), falls back to a pure-PyTorch
+   195→    dequantized GEMM. This is correct but slow — useful for unit tests.
+   196→    """
+   197→
+   198→    def __init__(self, config: SHMQMixLLMConfig, fp16_weight: Optional[torch.Tensor] = None):
+   199→        super().__init__()
+   200→        self.cfg = config
+   201→        self.in_features  = config.in_features
+   202→        self.out_features = config.out_features
+   203→        self.n_fp16 = config.n_fp16_channels
+   204→        self.n_int8 = config.n_int8_channels
+   205→        self.n_int4 = config.n_int4_channels
+   206→        assert self.n_fp16 + self.n_int8 + self.n_int4 == self.out_features, \
+   207→            f"Channel counts {self.n_fp16}+{self.n_int8}+{self.n_int4} " \
+   208→            f"!= out_features {self.out_features}"
+   209→
+   210→        # Store the permutation (indices into original weight rows)
+   211→        if config.permutation is not None:
+   212→            self.register_buffer(
+   213→                "permutation",
+   214→                config.permutation.to(torch.long),
+   215→                persistent=True,
+   216→            )
+   217→        else:
+   218→            self.register_buffer(
+   219→                "permutation",
+   220→                torch.arange(self.out_features, dtype=torch.long),
+   221→                persistent=True,
+   222→            )
+   223→
+   224→        # FP16 weight path (kept as fp16 for cuBLAS)
+   225→        if self.n_fp16 > 0:
+   226→            assert fp16_weight is not None, "fp16_weight required when n_fp16 > 0"
+   227→            # Slice the first n_fp16 rows of the (already permuted) weight
+   228→            w16 = fp16_weight[: self.n_fp16].to(torch.float16).contiguous()
+   229→            self.register_buffer("weight_fp16", w16, persistent=True)
+   230→        else:
+   231→            self.register_buffer("weight_fp16", torch.empty(0), persistent=True)
+   232→
+   233→        # INT8 + INT4 paths go through MixLLM (or PyTorch fallback)
+   234→        self._mixllm_linear = None  # will be set in _build_mixllm()
+   235→        self._fallback_int8_weight = None
+   236→        self._fallback_int8_scale = None
+   237→        self._fallback_int4_weight = None
+   238→        self._fallback_int4_scale = None
+   239→
+   240→        if self.n_int8 + self.n_int4 > 0:
+   241→            self._build_mixllm(fp16_weight)
+   242→
+   243→        # Bias
+   244→        if config.bias:
+   245→            self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16),
+   246→                                 persistent=True)
+   247→        else:
+   248→            self.bias = None
+   249→
+   250→    def _build_mixllm(self, fp16_weight: Optional[torch.Tensor]):
+   251→        """Build the MixLLM LinearMixLLM module for the INT8+INT4 slice."""
+   252→        assert fp16_weight is not None
+   253→        device = fp16_weight.device
+   254→        n_total = self.n_int8 + self.n_int4
+   255→
+   256→        # Slice the INT8 and INT4 portions of the permuted weight
+   257→        w8  = fp16_weight[self.n_fp16 : self.n_fp16 + self.n_int8].contiguous() \
+   258→              if self.n_int8 > 0 else None
+   259→        w4  = fp16_weight[self.n_fp16 + self.n_int8 :].contiguous() \
+   260→              if self.n_int4 > 0 else None
+   261→
+   262→        # Pack into MixLLM format
+   263→        if w8 is not None:
+   264→            weight_int8, weight_scale_int8 = pack_int8_weights(w8)
+   265→        else:
+   266→            weight_int8  = torch.empty(0, dtype=torch.int8,  device=device)
+   267→            weight_scale_int8 = torch.empty(0, dtype=torch.float16, device=device)
+   268→        if w4 is not None:
+   269→            weight_int4, weight_scale_int4, weight_zero_int4 = pack_int4_weights(w4)
+   270→        else:
+   271→            weight_int4  = torch.empty(0, dtype=torch.uint8, device=device)
+   272→            weight_scale_int4 = torch.empty(0, dtype=torch.float16, device=device)
+   273→            weight_zero_int4  = torch.empty(0, dtype=torch.uint8, device=device)
+   274→
+   275→        # Store the INT8/INT4 weights as buffers (for fallback path + saving)
+   276→        self.register_buffer("weight_int8",  weight_int8,  persistent=True)
+   277→        self.register_buffer("weight_int4",  weight_int4,  persistent=True)
+   278→        self.register_buffer("weight_scale_int8",  weight_scale_int8,  persistent=True)
+   279→        self.register_buffer("weight_scale_int4",  weight_scale_int4,  persistent=True)
+   280→        self.register_buffer("weight_zero_int4",   weight_zero_int4,   persistent=True)
+   281→
+   282→        # Indices: since SHMQ permutation already places the INT8 channels
+   283→        # first and INT4 channels last, the indices are simple ranges.
+   284→        # NOTE: these indices are into the OUTPUT of the MixLLM kernel
+   285→        # (which only computes the INT8+INT4 part), NOT into the full layer
+   286→        # output. The full layer output is assembled in forward().
+   287→        if self.n_int8 > 0:
+   288→            indices_int8 = torch.arange(self.n_int8, dtype=torch.int32, device=device)
+   289→        else:
+   290→            indices_int8 = torch.empty(0, dtype=torch.int32, device=device)
+   291→        if self.n_int4 > 0:
+   292→            indices_int4 = torch.arange(self.n_int4, dtype=torch.int32, device=device)
+   293→        else:
+   294→            indices_int4 = torch.empty(0, dtype=torch.int32, device=device)
+   295→        self.register_buffer("indices_int8", indices_int8, persistent=True)
+   296→        self.register_buffer("indices_int4", indices_int4, persistent=True)
+   297→
+   298→        # Build the MixLLM module if available
+   299→        if is_mixllm_available() and device.type == "cuda":
+   300→            try:
+   301→                from mixllm.nn.modules.linear import LinearMixLLM
+   302→                self._mixllm_linear = LinearMixLLM(
+   303→                    weight_int8=weight_int8 if self.n_int8 > 0 else None,
+   304→                    weight_int4=weight_int4 if self.n_int4 > 0 else None,
+   305→                    weight_scale_int8=weight_scale_int8,
+   306→                    weight_scale_int4=weight_scale_int4 if self.n_int4 > 0 else None,
+   307→                    weight_zero_int4=weight_zero_int4 if self.n_int4 > 0 else None,
+   308→                    indices_int8=indices_int8 if self.n_int8 > 0 else None,
+   309→                    indices_int4=indices_int4 if self.n_int4 > 0 else None,
+   310→                    bias=None,
+   311→                )
+   312→                logger.info(f"[mixllm] Built LinearMixLLM with "
+   313→                            f"{self.n_int8} INT8 + {self.n_int4} INT4 channels.")
+   314→            except Exception as e:
+   315→                logger.warning(f"[mixllm] Failed to build LinearMixLLM: {e}")
+   316→                self._mixllm_linear = None
+   317→        else:
+   318→            logger.info(f"[mixllm] MixLLM unavailable; using PyTorch fallback.")
+   319→
+   320→        # Always populate the fallback dequantized weights
+   321→        if self.n_int8 > 0:
+   322→            self._fallback_int8_weight = w8.to(torch.float16)
+   323→            self._fallback_int8_scale = weight_scale_int8
+   324→        if self.n_int4 > 0:
+   325→            self._fallback_int4_weight = w4.to(torch.float16)
+   326→            self._fallback_int4_scale = weight_scale_int4
+   327→
+   328→    # ------------------------------------------------------------------
+   329→    # Forward
+   330→    # ------------------------------------------------------------------
+   331→
+   332→    def forward(self, x: torch.Tensor) -> torch.Tensor:
+   333→        """Forward pass: combine FP16 + INT8 + INT4 outputs.
+   334→
+   335→        Args:
+   336→            x: (..., in_features) input tensor.
+   337→
+   338→        Returns:
+   339→            y: (..., out_features) output tensor in FP16.
+   340→        """
+   341→        # Flatten leading dims
+   342→        orig_shape = x.shape
+   343→        x_flat = x.reshape(-1, self.in_features).to(torch.float16)
+   344→        M = x_flat.shape[0]
+   345→
+   346→        outputs: List[torch.Tensor] = []
+   347→
+   348→        # --- FP16 path ---
+   349→        if self.n_fp16 > 0:
+   350→            # Standard cuBLAS matmul on the FP16 slice
+   351→            y16 = x_flat @ self.weight_fp16.t()  # (M, n_fp16)
+   352→            outputs.append(y16)
+   353→
+   354→        # --- INT8 + INT4 path ---
+   355→        if self.n_int8 + self.n_int4 > 0:
+   356→            y_mix = self._forward_mixllm(x_flat)  # (M, n_int8 + n_int4) or transposed
+   357→            outputs.append(y_mix)
+   358→
+   359→        # Concatenate along output dim (already in correct permuted order)
+   360→        if len(outputs) == 1:
+   361→            y = outputs[0]
+   362→        else:
+   363→            y = torch.cat(outputs, dim=-1)
+   364→
+   365→        # The output is now in PERMUTED order: [C16 | C8 | C4].
+   366→        # We need to scatter back to the original channel order.
+   367→        # The permutation buffer maps "permuted position i" -> "original channel idx".
+   368→        y_original = torch.empty(M, self.out_features, dtype=y.dtype, device=y.device)
+   369→        y_original[:, self.permutation] = y
+   370→
+   371→        # Add bias
+   372→        if self.bias is not None:
+   373→            y_original = y_original + self.bias
+   374→
+   375→        # Reshape back to original input shape
+   376→        return y_original.reshape(*orig_shape[:-1], self.out_features)
+   377→
+   378→    def _forward_mixllm(self, x_flat: torch.Tensor) -> torch.Tensor:
+   379→        """Forward through the MixLLM INT8+INT4 path (or PyTorch fallback)."""
+   380→        if self._mixllm_linear is not None:
+   381→            # MixLLM expects input on CUDA
+   382→            x_cuda = x_flat.cuda() if not x_flat.is_cuda else x_flat
+   383→            try:
+   384→                y_mix = self._mixllm_linear(x_cuda)
+   385→                # MixLLM returns column-major output if both INT8 and INT4 are present
+   386→                # (we handle the transpose in forward() via cat).
+   387→                return y_mix if y_mix.dim() == 2 else y_mix.reshape(-1, self.n_int8 + self.n_int4)
+   388→            except Exception as e:
+   389→                logger.warning(f"[mixllm] Forward failed ({e}); falling back to PyTorch.")
+   390→                return self._forward_mixllm_fallback(x_flat)
+   391→        else:
+   392→            return self._forward_mixllm_fallback(x_flat)
+   393→
+   394→    @torch.no_grad()
+   395→    def _forward_mixllm_fallback(self, x_flat: torch.Tensor) -> torch.Tensor:
+   396→        """Pure-PyTorch fallback for MixLLM (correct but slow)."""
+   397→        # Dequantize INT8 weights
+   398→        n_in = self.in_features
+   399→        gs = self.cfg.group_size
+   400→        n_groups = n_in // gs
+   401→
+   402→        outputs_mix: List[torch.Tensor] = []
+   403→
+   404→        if self.n_int8 > 0:
+   405→            # weight_int8: (n_int8, n_in) int8
+   406→            # weight_scale_int8: (n_groups, n_int8) fp16  [MixLLM convention]
+   407→            # We need to dequantize: w_deq[i, g*gs:(g+1)*gs] = w_int8[i, g*gs:(g+1)*gs] * scale[g, i]
+   408→            w8 = self.weight_int8.to(torch.float16).view(self.n_int8, n_groups, gs)
+   409→            # Transpose scale so it broadcasts: (n_groups, n_int8) -> (n_int8, n_groups, 1)
+   410→            s8 = self.weight_scale_int8.t().unsqueeze(-1)  # (n_int8, n_groups, 1)
+   411→            w8_deq = (w8 * s8).reshape(self.n_int8, n_in)
+   412→            y8 = x_flat @ w8_deq.t()  # (M, n_int8)
+   413→            outputs_mix.append(y8)
+   414→
+   415→        if self.n_int4 > 0:
+   416→            # weight_int4: (n_int4, n_in // 2) uint8 (packed)
+   417→            # Unpack to (n_int4, n_in) int8
+   418→            low  = (self.weight_int4 & 0x0F)
+   419→            high = (self.weight_int4 >> 4) & 0x0F
+   420→            w4_unpacked = torch.stack([low, high], dim=-1).reshape(self.n_int4, n_in)
+   421→            # Subtract zero point (8) to get signed INT4 in [-8, 7]
+   422→            w4_signed = (w4_unpacked.to(torch.float16) - 8.0)
+   423→            w4 = w4_signed.view(self.n_int4, n_groups, gs)
+   424→            # weight_scale_int4: (n_groups, n_int4) -> (n_int4, n_groups, 1)
+   425→            s4 = self.weight_scale_int4.t().unsqueeze(-1)
+   426→            w4_deq = (w4 * s4).reshape(self.n_int4, n_in)
+   427→            y4 = x_flat @ w4_deq.t()  # (M, n_int4)
+   428→            outputs_mix.append(y4)
+   429→
+   430→        if len(outputs_mix) == 1:
+   431→            return outputs_mix[0]
+   432→        return torch.cat(outputs_mix, dim=-1)
+   433→
+   434→    # ------------------------------------------------------------------
+   435→    # Misc
+   436→    # ------------------------------------------------------------------
+   437→
+   438→    def extra_repr(self) -> str:
+   439→        return (f"in_features={self.in_features}, "
+   440→                f"out_features={self.out_features}, "
+   441→                f"n_fp16={self.n_fp16}, n_int8={self.n_int8}, n_int4={self.n_int4}, "
+   442→                f"bias={self.bias is not None}")
+   443→
+   444→
+   445→# ----------------------------------------------------------------------
+   446→# Conversion utility: replace nn.Linear with SHMQMixLLMLinear
+   447→# ----------------------------------------------------------------------
+   448→
+   449→@dataclass
+   450→class ConversionSummary:
+   451→    n_layers_converted: int
+   452→    n_fp16_channels_total: int
+   453→    n_int8_channels_total: int
+   454→    n_int4_channels_total: int
+   455→    per_layer_summary: Dict[str, Dict[str, int]] = field(default_factory=dict)
+   456→    mixllm_available: bool = False
+   457→
+   458→    def __str__(self) -> str:
+   459→        return (
+   460→            f"Conversion summary:\n"
+   461→            f"  Layers converted: {self.n_layers_converted}\n"
+   462→            f"  Total FP16 channels: {self.n_fp16_channels_total}\n"
+   463→            f"  Total INT8 channels: {self.n_int8_channels_total}\n"
+   464→            f"  Total INT4 channels: {self.n_int4_channels_total}\n"
+   465→            f"  MixLLM kernel available: {self.mixllm_available}\n"
+   466→        )
+   467→
+   468→
+   469→def convert_linear_to_mixllm(
+   470→    layer: nn.Linear,
+   471→    bit_allocation_for_layer: int,
+   472→    permutation_indices: Optional[torch.Tensor] = None,
+   473→    cluster_sizes: Optional[Dict[int, int]] = None,
+   474→    intra_layer_hp_ratio_8: float = 0.20,
+   475→    intra_layer_hp_ratio_16: float = 0.05,
+   476→    group_size: int = 128,
+   477→) -> SHMQMixLLMLinear:
+   478→    """Convert a single nn.Linear to a SHMQMixLLMLinear.
+   479→
+   480→    Args:
+   481→        layer: the source nn.Linear.
+   482→        bit_allocation_for_layer: 4, 8, or 16 (inter-layer bit allocation).
+   483→            If 16: all channels are FP16.
+   484→            If 8: all INT8 channels, no FP16/INT4.
+   485→            If 4: split into C8/C4 based on intra_layer_hp_ratio_8.
+   486→            (Default SHMQ behavior: 4-bit layers have a small C8 cluster
+   487→             for the most-sensitive channels.)
+   488→        permutation_indices: (out_features,) LongTensor mapping
+   489→            permuted_position -> original_channel. If None, identity.
+   490→        cluster_sizes: optional {16: k16, 8: k8, 4: k4} dict (overrides
+   491→            intra_layer_hp_ratio_*). If None, computed from ratios.
+   492→        intra_layer_hp_ratio_8: fraction of channels to keep at INT8
+   493→            within a 4-bit layer (only used if cluster_sizes is None
+   494→            and bit_allocation_for_layer == 4).
+   495→        intra_layer_hp_ratio_16: fraction of channels to keep at FP16
+   496→            within a 4-bit layer (only used if cluster_sizes is None
+   497→            and bit_allocation_for_layer == 4).
+   498→        group_size: quantization group size (default 128).
+   499→
+   500→    Returns:
+   501→        A SHMQMixLLMLinear module with weights packed and ready for inference.
+   502→    """
+   503→    weight = layer.weight.data  # (out_features, in_features)
+   504→    n_out, n_in = weight.shape
+   505→    bias = layer.bias is not None
+   506→
+   507→    # Apply permutation to the weight rows
+   508→    if permutation_indices is not None:
+   509→        # permutation_indices[i] = original_channel_at_position_i
+   510→        # So we want: permuted_weight[i] = weight[permutation_indices[i]]
+   511→        weight_permuted = weight[permutation_indices.to(weight.device)].contiguous()
+   512→    else:
+   513→        weight_permuted = weight
+   514→
+   515→    # Determine cluster sizes
+   516→    if cluster_sizes is not None:
+   517→        k16 = cluster_sizes.get(16, 0)
+   518→        k8  = cluster_sizes.get(8, 0)
+   519→        k4  = cluster_sizes.get(4, 0)
+   520→        assert k16 + k8 + k4 == n_out, \
+   521→            f"Cluster sizes {k16}+{k8}+{k4} != out_features {n_out}"
+   522→    elif bit_allocation_for_layer == 16:
+   523→        k16, k8, k4 = n_out, 0, 0
+   524→    elif bit_allocation_for_layer == 8:
+   525→        k16, k8, k4 = 0, n_out, 0
+   526→    elif bit_allocation_for_layer == 4:
+   527→        k16 = int(n_out * intra_layer_hp_ratio_16)
+   528→        k8  = int(n_out * intra_layer_hp_ratio_8)
+   529→        k4  = n_out - k16 - k8
+   530→    else:
+   531→        raise ValueError(f"Unsupported bit_allocation: {bit_allocation_for_layer}")
+   532→
+   533→    cfg = SHMQMixLLMConfig(
+   534→        in_features=n_in,
+   535→        out_features=n_out,
+   536→        n_fp16_channels=k16,
+   537→        n_int8_channels=k8,
+   538→        n_int4_channels=k4,
+   539→        group_size=group_size,
+   540→        bias=bias,
+   541→        permutation=permutation_indices,
+   542→    )
+   543→
+   544→    new_module = SHMQMixLLMLinear(cfg, fp16_weight=weight_permuted)
+   545→    if bias:
+   546→        new_module.bias = layer.bias.data.to(torch.float16).clone()
+   547→
+   548→    return new_module
+   549→
+   550→
+   551→def convert_model_to_mixllm(
+   552→    model: nn.Module,
+   553→    layer_names: List[str],
+   554→    bit_allocation: Dict[str, int],
+   555→    permutation_indices: Dict[str, torch.Tensor],
+   556→    cluster_sizes: Optional[Dict[str, Dict[int, int]]] = None,
+   557→    intra_layer_hp_ratio_8: float = 0.20,
+   558→    intra_layer_hp_ratio_16: float = 0.05,
+   559→    group_size: int = 128,
+   560→    verbose: bool = False,
+   561→) -> ConversionSummary:
+   562→    """Replace every nn.Linear in `layer_names` with a SHMQMixLLMLinear.
+   563→
+   564→    Args:
+   565→        model: the model to convert in-place.
+   566→        layer_names: list of layer names (dotted module paths) to convert.
+   567→        bit_allocation: {layer_name: 4 | 8 | 16}.
+   568→        permutation_indices: {layer_name: LongTensor[out_features]}.
+   569→        cluster_sizes: optional {layer_name: {16: k16, 8: k8, 4: k4}}.
+   570→        intra_layer_hp_ratio_8, _16: fallback ratios when cluster_sizes is None.
+   571→        group_size: quantization group size.
+   572→        verbose: print per-layer info.
+   573→
+   574→    Returns:
+   575→        ConversionSummary with statistics.
+   576→    """
+   577→    from ..utils import get_module_by_name, get_parent_module_and_attr
+   578→
+   579→    total_fp16 = total_int8 = total_int4 = 0
+   580→    per_layer: Dict[str, Dict[str, int]] = {}
+   581→    n_converted = 0
+   582→
+   583→    for name in layer_names:
+   584→        parent, attr = get_parent_module_and_attr(model, name)
+   585→        if parent is None or not hasattr(parent, attr):
+   586→            logger.warning(f"[mixllm] Layer {name} not found in model; skipping.")
+   587→            continue
+   588→        layer = getattr(parent, attr)
+   589→        if not isinstance(layer, nn.Linear):
+   590→            logger.warning(f"[mixllm] Layer {name} is not nn.Linear ({type(layer)}); skipping.")
+   591→            continue
+   592→
+   593→        bits = bit_allocation.get(name, 4)
+   594→        perm = permutation_indices.get(name)
+   595→        cs = cluster_sizes.get(name) if cluster_sizes else None
+   596→
+   597→        new_module = convert_linear_to_mixllm(
+   598→            layer,
+   599→            bit_allocation_for_layer=bits,
+   600→            permutation_indices=perm,
+   601→            cluster_sizes=cs,
+   602→            intra_layer_hp_ratio_8=intra_layer_hp_ratio_8,
+   603→            intra_layer_hp_ratio_16=intra_layer_hp_ratio_16,
+   604→            group_size=group_size,
+   605→        )
+   606→        setattr(parent, attr, new_module)
+   607→        n_converted += 1
+   608→        per_layer[name] = {
+   609→            "bits": bits,
+   610→            "n_fp16": new_module.n_fp16,
+   611→            "n_int8": new_module.n_int8,
+   612→            "n_int4": new_module.n_int4,
+   613→        }
+   614→        total_fp16 += new_module.n_fp16
+   615→        total_int8 += new_module.n_int8
+   616→        total_int4 += new_module.n_int4
+   617→
+   618→        if verbose:
+   619→            logger.info(
+   620→                f"[mixllm] {name}: bits={bits}, "
+   621→                f"fp16={new_module.n_fp16}, int8={new_module.n_int8}, int4={new_module.n_int4}"
+   622→            )
+   623→
+   624→    return ConversionSummary(
+   625→        n_layers_converted=n_converted,
+   626→        n_fp16_channels_total=total_fp16,
+   627→        n_int8_channels_total=total_int8,
+   628→        n_int4_channels_total=total_int4,
+   629→        per_layer_summary=per_layer,
+   630→        mixllm_available=is_mixllm_available(),
+   631→    )
+   632→
