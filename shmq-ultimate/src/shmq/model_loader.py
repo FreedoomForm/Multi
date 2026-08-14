@@ -114,19 +114,31 @@ class ModelLoader:
             m = block_pattern.search(name)
             block_idx = int(m.group(1)) if m else -1
 
-            # Determine parallel group key (block_idx + group)
+            # Determine parallel group key (block_idx + group + output_size)
             # q/k/v share one key; up/gate share another; o/down are NOT parallel
             # (they have a single preceding norm/activation, but their INPUT comes from
             #  a single source, so the parallel constraint does not apply).
+            #
+            # GQA AWARENESS: For models with Grouped Query Attention (Qwen2.5,
+            # Llama-3, Mistral, etc.), q_proj has more output channels than
+            # k_proj/v_proj. The SHMQ parallel constraint requires layers in
+            # the same group to have the SAME output size (for permutation
+            # fusion to work). So we split q/k/v into:
+            #   - "qkv" group if all three have the same out_features (MHA)
+            #   - "q" group alone + "kv" group together if GQA
+            # Similarly for up/gate (though they always match in current LLMs).
             is_parallel = False
             parallel_group_key = None
             if block_idx >= 0:
+                out_features = module.weight.shape[0]
                 if suffix in ("q_proj", "k_proj", "v_proj"):
                     is_parallel = True
-                    parallel_group_key = f"layers.{block_idx}.attention_qkv"
+                    # GQA: k_proj and v_proj have same out_features, q_proj is larger.
+                    # Use output_size in the key to keep same-size layers together.
+                    parallel_group_key = f"layers.{block_idx}.attn_out{out_features}"
                 elif suffix in ("up_proj", "gate_proj"):
                     is_parallel = True
-                    parallel_group_key = f"layers.{block_idx}.ffn_upgate"
+                    parallel_group_key = f"layers.{block_idx}.ffn_out{out_features}"
                 # o_proj and down_proj are NOT parallel (single preceding source).
 
             info = LayerInfo(

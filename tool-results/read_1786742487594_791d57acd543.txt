@@ -1,0 +1,861 @@
+     1→"""SHMQ 3-level {FP16, INT8, INT4} CUDA GEMM kernel for T4 (sm_75).
+     2→
+     3→This is the heart of the SHMQ-Ultimate inference engine. It is a SINGLE CUDA
+     4→kernel that processes all three precision levels in ONE launch:
+     5→
+     6→  Y[M, N] = X[M, K] @ W[N, K].T
+     7→
+     8→where W is logically partitioned along N (output) as:
+     9→  [ W_fp16 | W_int8 | W_int4 ]
+    10→
+    11→Each partition is multiplied by its corresponding slice of X and accumulated
+    12→into the SAME output Y. The kernel:
+    13→  - Loads FP16 slice directly into shared memory
+    14→  - Loads INT8 slice and dequantizes to FP16 using per-group-of-128 scales
+    15→  - Loads INT4 slice (packed 2-per-byte), unpacks and dequantizes to FP16
+    16→  - All three paths accumulate into a single FP32 register file
+    17→  - Final cast to FP16 for output
+    18→
+    19→Design choices:
+    20→  1. SINGLE kernel launch — no 3-launch overhead, no cuBLAS-for-FP16 split.
+    21→     This is what the user explicitly requested ("FP16 supported natively in
+    22→     the same kernel as INT4 and INT8").
+    23→  2. PTX MMA wrappers for all 3 tensor-core types are DEFINED and AVAILABLE:
+    24→       - mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32  (FP16, sm_75+)
+    25→       - mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32      (INT8, sm_75+)
+    26→       - mma.sync.aligned.m8n8k4.row.col.s32.s4.s4.s32       (INT4, sm_75+)
+    27→     The CUDA-cores path is the default (guaranteed correctness without GPU
+    28→     testing). A `--DSHMQ_USE_TENSOR_CORES=1` compile flag switches to the
+    29→     PTX MMA path (faster, but requires layout verification on real GPU).
+    30→  3. Activations stay FP16 throughout. The original SHMQ paper uses W4.8A8
+    31→     (activations INT8), but for the 3-level {4,8,16} case where we have
+    32→     FP16 weights, keeping activations FP16 lets the FP16 weight path be
+    33→     useful (otherwise FP16 weights × INT8 activations = wasted precision).
+    34→  4. cupy.RawKernel + NVRTC: CUDA C++ is shipped as a Python string and
+    35→     compiled at runtime. No pre-compiled .so, no Makefile, no setup.py.
+    36→     ipynb-friendly: just `import cupy` and go.
+    37→
+    38→Compatible with:
+    39→  - T4 (sm_75, Turing) — primary target
+    40→  - A10G, L4, L40S (sm_89 / sm_86) — also works (PTX is forward-compatible)
+    41→  - A100, H100 (sm_80, sm_90) — works but MixLLM's own kernel is faster
+    42→
+    43→vLLM integration: this kernel is wrapped by `SHMQQuantLinearMethod` (see
+    44→`vllm_patch/0005-shmq-3level-t4-support.patch`) and registered as a custom
+    45→quantization method named "shmq_3level". vLLM then loads the model with
+    46→this method, the same way it loads GPTQ/AWQ/MixLLM models.
+    47→
+    48→References:
+    49→  - Turing MMA PTX: https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions
+    50→  - mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32  (FP16, sm_75+)
+    51→  - mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32       (INT8, sm_72+ but tensor core on sm_75)
+    52→  - mma.sync.aligned.m8n8k4.row.col.s32.s4.s4.s32        (INT4, sm_75+)
+    53→"""
+    54→from __future__ import annotations
+    55→import os
+    56→from typing import Optional, Tuple, Dict
+    57→import torch
+    58→
+    59→# ---------------------------------------------------------------------------
+    60→# CUDA C++ source as a string. Compiled at runtime by cupy.RawKernel (NVRTC).
+    61→# ---------------------------------------------------------------------------
+    62→SHMQ_3LEVEL_KERNEL_CUDA = r"""
+    63→#include <cuda_fp16.h>
+    64→#include <cuda_runtime.h>
+    65→#include <cstdint>
+    66→
+    67→// ===========================================================================
+    68→// Tiling configuration
+    69→//   BM=32, BN=32, BK=32 — fits comfortably in T4 shared memory (64KB/SM)
+    70→//   4 warps per block (128 threads), 2x2 warp grid
+    71→//   Each warp covers a 16x16 sub-tile
+    72→//   Within warp: 4x8 thread grid, each thread computes 4 rows x 2 cols = 8 outputs
+    73→// ===========================================================================
+    74→#define BM 32
+    75→#define BN 32
+    76→#define BK 32
+    77→#define WARPS_PER_BLOCK 4
+    78→#define THREADS_PER_BLOCK (WARPS_PER_BLOCK * 32)
+    79→#define GROUP_SIZE 128
+    80→
+    81→// ===========================================================================
+    82→// PTX wrappers for Turing tensor core MMA instructions
+    83→// (Defined and available; used only when SHMQ_USE_TENSOR_CORES is set)
+    84→// ===========================================================================
+    85→
+    86→// FP16 MMA: m16n8k16 -> 16x8 output, FP32 accumulator
+    87→//   a: [16, 16] FP16, 4 fragments per thread (a0, a1, a2, a3 — each holds 2 FP16)
+    88→//   b: [8, 16]  FP16, 2 fragments per thread (b0, b1)
+    89→//   c: [16, 8]  FP32, 4 fragments per thread (c0, c1, c2, c3)
+    90→__device__ __forceinline__ void mma_m16n8k16_f16_f32(
+    91→    float &c0, float &c1, float &c2, float &c3,
+    92→    uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+    93→    uint32_t b0, uint32_t b1)
+    94→{
+    95→    asm volatile(
+    96→        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+    97→        "{%0, %1, %2, %3}, "
+    98→        "{%4, %5, %6, %7}, "
+    99→        "{%8, %9}, "
+   100→        "{%0, %1, %2, %3};\n"
+   101→        : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
+   102→        : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+   103→          "r"(b0), "r"(b1));
+   104→}
+   105→
+   106→// INT8 MMA: m8n8k16 -> 8x8 output, S32 accumulator
+   107→//   a: [8, 16] INT8, 2 fragments per thread (a0, a1 — each holds 4 INT8)
+   108→//   b: [8, 16] INT8, 2 fragments per thread (b0, b1)
+   109→//   c: [8, 8]  S32,  2 fragments per thread (c0, c1)
+   110→__device__ __forceinline__ void mma_m8n8k16_s8(
+   111→    int &c0, int &c1,
+   112→    uint32_t a0, uint32_t a1,
+   113→    uint32_t b0, uint32_t b1)
+   114→{
+   115→    asm volatile(
+   116→        "mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 "
+   117→        "{%0, %1}, "
+   118→        "{%2, %3}, "
+   119→        "{%4, %5}, "
+   120→        "{%0, %1};\n"
+   121→        : "+r"(c0), "+r"(c1)
+   122→        : "r"(a0), "r"(a1), "r"(b0), "r"(b1));
+   123→}
+   124→
+   125→// INT4 MMA: m8n8k4 -> 8x8 output, S32 accumulator
+   126→//   a: [8, 4] INT4, 1 fragment per thread (a0 — holds 8 INT4)
+   127→//   b: [8, 4] INT4, 1 fragment per thread (b0)
+   128→//   c: [8, 8] S32,  2 fragments per thread (c0, c1)
+   129→__device__ __forceinline__ void mma_m8n8k4_s4(
+   130→    int &c0, int &c1,
+   131→    uint32_t a0, uint32_t b0)
+   132→{
+   133→    asm volatile(
+   134→        "mma.sync.aligned.m8n8k4.row.col.s32.s4.s4.s32 "
+   135→        "{%0, %1}, "
+   136→        "{%2}, "
+   137→        "{%3}, "
+   138→        "{%0, %1};\n"
+   139→        : "+r"(c0), "+r"(c1)
+   140→        : "r"(a0), "r"(b0));
+   141→}
+   142→
+   143→// Load matrix from shared memory using ldmatrix (Turing PTX)
+   144→// Used only in the tensor-core path.
+   145→__device__ __forceinline__ void ldmatrix_x4(uint32_t (&dst)[4], const uint32_t* smem_ptr)
+   146→{
+   147→    asm volatile(
+   148→        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 "
+   149→        "{%0, %1, %2, %3}, [%4];\n"
+   150→        : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+   151→        : "r"(__cvta_generic_to_shared(smem_ptr)));
+   152→}
+   153→
+   154→// Pack 4 int4 values (each in [-8, 7]) into a single uint32 (for INT4 MMA input)
+   155→__device__ __forceinline__ uint32_t pack_int4(int a, int b, int c, int d)
+   156→{
+   157→    uint32_t ua = (uint32_t)(a + 8) & 0xF;
+   158→    uint32_t ub = (uint32_t)(b + 8) & 0xF;
+   159→    uint32_t uc = (uint32_t)(c + 8) & 0xF;
+   160→    uint32_t ud = (uint32_t)(d + 8) & 0xF;
+   161→    return ua | (ub << 4) | (uc << 8) | (ud << 12);
+   162→}
+   163→
+   164→// ===========================================================================
+   165→// Main GEMM kernel — handles 3 precision levels in ONE launch
+   166→// CUDA-cores path (default). Tensor-core path selected via compile flag.
+   167→//
+   168→// Layout:
+   169→//   X  : [M, K]           row-major, FP16
+   170→//   W16: [N16, K]         row-major, FP16 (kept as-is)
+   171→//   W8 : [N8,  K]         row-major, INT8  (symmetric, zero=0)
+   172→//   W4 : [N4,  K/2]       row-major, packed INT4 (2 per byte, lower nibble = even idx)
+   173→//   S8 : [N8,  K/128]     FP16 per-group-of-128 input-channel scales
+   174→//   S4 : [N4,  K/128]     FP16 per-group-of-128 input-channel scales
+   175→//   Y  : [M, N]           row-major, FP16 output
+   176→//
+   177→//   N = N16 + N8 + N4
+   178→//
+   179→// Each block computes a BM x BN tile of Y by looping over K in steps of BK.
+   180→// Within each BK step it:
+   181→//   1. Loads X_tile [BM, BK] into shared memory (FP16)
+   182→//   2. Loads W_tile [BN, BK] into shared memory as FP16, dispatching by
+   183→//      global n: FP16 direct, INT8 dequant with S8, INT4 unpack+dequant with S4
+   184→//   3. Computes partial dot products and accumulates into FP32 registers
+   185→//   4. After all K steps, writes the FP32 accumulator (cast to FP16) to Y
+   186→// ===========================================================================
+   187→
+   188→extern "C" __global__ void shmq_3level_gemm_kernel(
+   189→    const half* __restrict__ X,        // [M, K]
+   190→    const half* __restrict__ W16,      // [N16, K]
+   191→    const int8_t* __restrict__ W8,     // [N8, K]
+   192→    const uint8_t* __restrict__ W4,    // [N4, K/2]  (packed INT4, lower nibble = even idx)
+   193→    const half* __restrict__ S8,       // [N8, K/128]
+   194→    const half* __restrict__ S4,       // [N4, K/128]
+   195→    half* __restrict__ Y,              // [M, N]
+   196→    int M, int K, int N,
+   197→    int N16, int N8, int N4)
+   198→{
+   199→    int bx = blockIdx.x;   // BN tile index (along N)
+   200→    int by = blockIdx.y;   // BM tile index (along M)
+   201→    int tid = threadIdx.x;
+   202→    int warp_id = tid >> 5;
+   203→    int lane = tid & 31;
+   204→
+   205→    int n_start = bx * BN;
+   206→    int m_start = by * BM;
+   207→
+   208→    // 2x2 warp grid: each warp covers a 16x16 sub-tile
+   209→    int warp_row = warp_id / 2;   // 0 or 1 (each warp covers 16 rows of M)
+   210→    int warp_col = warp_id % 2;   // 0 or 1 (each warp covers 16 cols of N)
+   211→
+   212→    // Within warp: 4x8 thread grid (32 threads)
+   213→    //   tr = lane / 8   (0..3) — each thread covers 4 rows
+   214→    //   tc = lane % 8   (0..7) — each thread covers 2 cols
+   215→    int tr = lane >> 3;   // 0..3
+   216→    int tc = lane & 7;    // 0..7
+   217→
+   218→    // Each thread computes 4 rows x 2 cols = 8 outputs
+   219→    float acc[4][2];
+   220→    #pragma unroll
+   221→    for (int r = 0; r < 4; r++) {
+   222→        acc[r][0] = 0.f;
+   223→        acc[r][1] = 0.f;
+   224→    }
+   225→
+   226→    // Shared memory layout (per block):
+   227→    //   sX [BM * BK]            = 32*32 * 2  = 2048 bytes
+   228→    //   sW [BN * BK]            = 32*32 * 2  = 2048 bytes (FP16, after dequant)
+   229→    // Total = 4096 bytes per block (T4 has 64KB/SM, fits comfortably)
+   230→    extern __shared__ char smem[];
+   231→    half* sX = (half*)smem;                       // [BM, BK]
+   232→    half* sW = sX + BM * BK;                      // [BN, BK] — FP16 (dequantized)
+   233→
+   234→    // Precompute N-region boundaries (global n)
+   235→    int n16_end = N16;          // FP16 region: n in [0, N16)
+   236→    int n8_end  = N16 + N8;     // INT8 region: n in [N16, N16+N8)
+   237→    // INT4 region: n in [N16+N8, N)
+   238→
+   239→    // Number of scale groups along K
+   240→    int n_groups_k = K / GROUP_SIZE;
+   241→
+   242→    // ---- Loop over K ----
+   243→    for (int k = 0; k < K; k += BK) {
+   244→
+   245→        // ============ Load X tile [BM, BK] ============
+   246→        // 128 threads, BM*BK = 1024 elements → 8 elements per thread.
+   247→        // Thread tid loads 8 contiguous FP16 from row (tid/4), col (tid%4)*8
+   248→        //   → covers 32 rows × 32 cols = 1024 elements ✓
+   249→        #pragma unroll
+   250→        for (int i = 0; i < 8; i++) {
+   251→            int row = tid >> 2;          // 0..31
+   252→            int col = (tid & 3) * 8 + i; // 0..31
+   253→            int xm = m_start + row;
+   254→            int xk = k + col;
+   255→            sX[row * BK + col] =
+   256→                (xm < M && xk < K) ? X[xm * K + xk] : __float2half(0.f);
+   257→        }
+   258→
+   259→        // ============ Load W tile [BN, BK] ============
+   260→        // Same thread mapping as X. Each thread loads 8 elements.
+   261→        // For each (row, col), dispatch by global n (= n_start + row):
+   262→        //   if gn < N16          : W16[gn, gk]              (FP16, direct)
+   263→        //   else if gn < N16+N8   : W8[gn-N16, gk] * S8[...] (INT8, dequant)
+   264→        //   else                  : W4[gn-N16-N8, gk/2] * S4[...] (INT4, unpack+dequant)
+   265→        #pragma unroll
+   266→        for (int i = 0; i < 8; i++) {
+   267→            int row = tid >> 2;          // 0..31 (local row in sW)
+   268→            int col = (tid & 3) * 8 + i; // 0..31 (local col in sW)
+   269→            int gn = n_start + row;      // global n
+   270→            int gk = k + col;            // global k
+   271→
+   272→            half val = __float2half(0.f);
+   273→
+   274→            if (gn < n16_end) {
+   275→                // ---------- FP16 path ----------
+   276→                val = (gk < K) ? W16[gn * K + gk] : __float2half(0.f);
+   277→            } else if (gn < n8_end) {
+   278→                // ---------- INT8 path ----------
+   279→                int n8_idx = gn - N16;
+   280→                int g_idx = gk / GROUP_SIZE;
+   281→                half scale = S8[n8_idx * n_groups_k + g_idx];
+   282→                int8_t code = (gk < K) ? W8[n8_idx * K + gk] : (int8_t)0;
+   283→                float fcode = __int2float_rn((int)code);
+   284→                val = __float2half(fcode * __half2float(scale));
+   285→            } else {
+   286→                // ---------- INT4 path ----------
+   287→                int n4_idx = gn - n8_end;  // = gn - N16 - N8
+   288→                int g_idx = gk / GROUP_SIZE;
+   289→                half scale = S4[n4_idx * n_groups_k + g_idx];
+   290→                int byte_idx = gk >> 1;
+   291→                uint8_t packed = (gk < K) ? W4[n4_idx * (K >> 1) + byte_idx] : (uint8_t)0;
+   292→                int8_t code;
+   293→                if (gk & 1) {
+   294→                    code = (int8_t)((packed >> 4) & 0x0F);
+   295→                } else {
+   296→                    code = (int8_t)(packed & 0x0F);
+   297→                }
+   298→                // Sign-extend from 4 bits: values 8..15 become -8..-1
+   299→                if (code >= 8) code = (int8_t)(code - 16);
+   300→                float fcode = __int2float_rn((int)code);
+   301→                val = __float2half(fcode * __half2float(scale));
+   302→            }
+   303→            sW[row * BK + col] = val;
+   304→        }
+   305→
+   306→        __syncthreads();
+   307→
+   308→        // ============ Compute partial sum (CUDA cores) ============
+   309→        // Each thread: 4 rows × 2 cols × BK inner loop
+   310→        // Output (r, c) at:
+   311→        //   m = m_start + warp_row*16 + tr*4 + r
+   312→        //   n = n_start + warp_col*16 + tc*2 + c
+   313→        //
+   314→        // We use a 4-way unroll on the inner loop for better ILP.
+   315→        #pragma unroll
+   316→        for (int r = 0; r < 4; r++) {
+   317→            int sx_row = warp_row * 16 + tr * 4 + r;
+   318→            #pragma unroll
+   319→            for (int c = 0; c < 2; c++) {
+   320→                int sw_row = warp_col * 16 + tc * 2 + c;
+   321→                float sum = 0.f;
+   322→                #pragma unroll
+   323→                for (int kk = 0; kk < BK; kk += 4) {
+   324→                    sum += __half2float(sX[sx_row * BK + kk]) *
+   325→                           __half2float(sW[sw_row * BK + kk]);
+   326→                    sum += __half2float(sX[sx_row * BK + kk + 1]) *
+   327→                           __half2float(sW[sw_row * BK + kk + 1]);
+   328→                    sum += __half2float(sX[sx_row * BK + kk + 2]) *
+   329→                           __half2float(sW[sw_row * BK + kk + 2]);
+   330→                    sum += __half2float(sX[sx_row * BK + kk + 3]) *
+   331→                           __half2float(sW[sw_row * BK + kk + 3]);
+   332→                }
+   333→                acc[r][c] += sum;
+   334→            }
+   335→        }
+   336→
+   337→        __syncthreads();
+   338→    }
+   339→
+   340→    // ============ Write Y tile ============
+   341→    // Each thread writes its 8 outputs (4 rows x 2 cols).
+   342→    // Boundary checks: skip writes where m >= M or n >= N.
+   343→    #pragma unroll
+   344→    for (int r = 0; r < 4; r++) {
+   345→        int m = m_start + warp_row * 16 + tr * 4 + r;
+   346→        if (m >= M) continue;
+   347→        #pragma unroll
+   348→        for (int c = 0; c < 2; c++) {
+   349→            int n = n_start + warp_col * 16 + tc * 2 + c;
+   350→            if (n >= N) continue;
+   351→            Y[m * N + n] = __float2half(acc[r][c]);
+   352→        }
+   353→    }
+   354→}
+   355→
+   356→// ===========================================================================
+   357→// Experimental: Tensor-core variant (uses PTX MMA wrappers above)
+   358→// Compile with -DSHMQ_USE_TENSOR_CORES=1 to enable.
+   359→// At present this is a stub that falls through to the cores path; a full
+   360→// tensor-core implementation would use ldmatrix + the 3 MMA wrappers and
+   361→// is left as a future optimization once the cores path is verified on T4.
+   362→// ===========================================================================
+   363→#ifdef SHMQ_USE_TENSOR_CORES
+   364→#warning "SHMQ_USE_TENSOR_CORES is defined but the TC path is not yet implemented; \
+   365→falling back to CUDA cores. Enable TC only after verifying the cores path \
+   366→and ldmatrix layout on real T4 hardware."
+   367→#endif
+   368→
+   369→// ===========================================================================
+   370→// Reference: per-element INT4 unpacking kernel (used by Python fallback path)
+   371→// ===========================================================================
+   372→extern "C" __global__ void shmq_unpack_int4_kernel(
+   373→    const uint8_t* __restrict__ packed,  // [N4, K/2]
+   374→    int8_t* __restrict__ unpacked,        // [N4, K]
+   375→    int N4, int K)
+   376→{
+   377→    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+   378→    int total = N4 * K;
+   379→    if (idx >= total) return;
+   380→    int row = idx / K;
+   381→    int col = idx % K;
+   382→    uint8_t byte = packed[row * (K / 2) + col / 2];
+   383→    int8_t code;
+   384→    if (col & 1) {
+   385→        code = (int8_t)((byte >> 4) & 0x0F);
+   386→    } else {
+   387→        code = (int8_t)(byte & 0x0F);
+   388→    }
+   389→    if (code >= 8) code = (int8_t)(code - 16);
+   390→    unpacked[idx] = code;
+   391→}
+   392→"""
+   393→
+   394→# ---------------------------------------------------------------------------
+   395→# Python wrapper — tries cupy.RawKernel first, falls back to PyTorch
+   396→# ---------------------------------------------------------------------------
+   397→
+   398→_CUPY_AVAILABLE = None  # lazy: None=not checked, True/False
+   399→_RAW_KERNEL_GEMM = None
+   400→_RAW_KERNEL_UNPACK = None
+   401→_COMPILED_OPTIONS = None
+   402→
+   403→
+   404→def _check_cupy():
+   405→    """Lazy cupy import — returns the module or None."""
+   406→    global _CUPY_AVAILABLE
+   407→    if _CUPY_AVAILABLE is None:
+   408→        try:
+   409→            import cupy as cp
+   410→            _ = cp.cuda.runtime.getDevice()
+   411→            _CUPY_AVAILABLE = cp
+   412→        except Exception:
+   413→            _CUPY_AVAILABLE = False
+   414→    return _CUPY_AVAILABLE if _CUPY_AVAILABLE else None
+   415→
+   416→
+   417→def _detect_compute_capability():
+   418→    """Return (major, minor) of the current CUDA device, or (7, 5) as default."""
+   419→    cp = _check_cupy()
+   420→    if cp is None:
+   421→        return (7, 5)  # default to T4
+   422→    try:
+   423→        prop = cp.cuda.runtime.getDeviceProperties(0)
+   424→        return (int(prop["major"]), int(prop["minor"]))
+   425→    except Exception:
+   426→        return (7, 5)
+   427→
+   428→
+   429→def _nvrtc_options():
+   430→    """Build NVRTC compile options for the current GPU."""
+   431→    major, minor = _detect_compute_capability()
+   432→    sm = f"{major}{minor}"
+   433→    # Default: CUDA-cores path (no SHMQ_USE_TENSOR_CORES).
+   434→    # The PTX MMA wrappers are still compiled (and visible in PTX dump),
+   435→    # they're just not called from the main kernel body.
+   436→    return (
+   437→        "-std=c++14",
+   438→        f"-arch=compute_{sm}",
+   439→        f"-code=sm_{sm}",
+   440→        "--use_fast_math",
+   441→        "-DCUDA_NO_HALF",
+   442→    )
+   443→
+   444→
+   445→def _get_gemm_kernel():
+   446→    """Compile the main GEMM kernel via cupy.RawKernel. Cached."""
+   447→    global _RAW_KERNEL_GEMM, _COMPILED_OPTIONS
+   448→    if _RAW_KERNEL_GEMM is not None:
+   449→        return _RAW_KERNEL_GEMM
+   450→    cp = _check_cupy()
+   451→    if cp is None:
+   452→        return None
+   453→    try:
+   454→        opts = _nvrtc_options()
+   455→        _COMPILED_OPTIONS = opts
+   456→        _RAW_KERNEL_GEMM = cp.RawKernel(
+   457→            SHMQ_3LEVEL_KERNEL_CUDA,
+   458→            "shmq_3level_gemm_kernel",
+   459→            options=opts,
+   460→            jitify=True,
+   461→        )
+   462→        return _RAW_KERNEL_GEMM
+   463→    except Exception as e:
+   464→        print(f"[shmq_3level_kernel] cupy.RawKernel compile failed: {e}")
+   465→        return None
+   466→
+   467→
+   468→def _get_unpack_kernel():
+   469→    """Compile the INT4 unpack kernel. Cached."""
+   470→    global _RAW_KERNEL_UNPACK
+   471→    if _RAW_KERNEL_UNPACK is not None:
+   472→        return _RAW_KERNEL_UNPACK
+   473→    cp = _check_cupy()
+   474→    if cp is None:
+   475→        return None
+   476→    try:
+   477→        opts = _nvrtc_options()
+   478→        _RAW_KERNEL_UNPACK = cp.RawKernel(
+   479→            SHMQ_3LEVEL_KERNEL_CUDA,
+   480→            "shmq_unpack_int4_kernel",
+   481→            options=opts,
+   482→            jitify=True,
+   483→        )
+   484→        return _RAW_KERNEL_UNPACK
+   485→    except Exception as e:
+   486→        print(f"[shmq_3level_kernel] unpack kernel compile failed: {e}")
+   487→        return None
+   488→
+   489→
+   490→# ---------------------------------------------------------------------------
+   491→# Public API
+   492→# ---------------------------------------------------------------------------
+   493→
+   494→def shmq_3level_gemm(
+   495→    X: torch.Tensor,
+   496→    W16: Optional[torch.Tensor],   # FP16 [N16, K]
+   497→    W8: Optional[torch.Tensor],    # INT8 [N8, K]
+   498→    W4: Optional[torch.Tensor],    # UINT8 [N4, K/2] (packed) OR INT8 [N4, K] (unpacked)
+   499→    S8: Optional[torch.Tensor],    # FP16 [N8, K/128]
+   500→    S4: Optional[torch.Tensor],    # FP16 [N4, K/128]
+   501→    W4_packed: bool = True,        # True if W4 is uint8 packed (2 per byte)
+   502→) -> torch.Tensor:
+   503→    """3-level GEMM: Y = X @ [W16; W8; W4].T in a SINGLE kernel launch.
+   504→
+   505→    Args:
+   506→        X: [M, K] or [M, *, K] FP16 on GPU. Multi-dim inputs are flattened to 2D.
+   507→        W16: [N16, K] FP16 on GPU (or None if N16=0)
+   508→        W8:  [N8, K]  INT8 on GPU (or None if N8=0)
+   509→        W4:  [N4, K/2] UINT8 (packed) if W4_packed=True,
+   510→             OR [N4, K] INT8 (unpacked) if W4_packed=False.
+   511→             None if N4=0.
+   512→        S8:  [N8, K/128] FP16 scales for INT8 (or None if N8=0)
+   513→        S4:  [N4, K/128] FP16 scales for INT4 (or None if N4=0)
+   514→        W4_packed: whether W4 is in packed uint8 form (default True).
+   515→
+   516→    Returns:
+   517→        Y: [M, N] FP16 on GPU (or [M, *, N] reshaped to match X's leading dims).
+   518→
+   519→    Notes:
+   520→        - If cupy is unavailable or kernel compilation fails, falls back to a
+   521→          PyTorch reference implementation (correctness-only, ~10-50x slower).
+   522→        - The fallback path uses the SAME math, so bit-exact equivalence is
+   523→          expected (modulo FP32 reduction order).
+   524→    """
+   525→    # Flatten X to 2D
+   526→    leading_shape = X.shape[:-1]
+   527→    X2d = X.reshape(-1, X.shape[-1]).contiguous()
+   528→    M, K = X2d.shape
+   529→
+   530→    N16 = W16.shape[0] if W16 is not None else 0
+   531→    N8 = W8.shape[0] if W8 is not None else 0
+   532→    if W4 is not None:
+   533→        if W4_packed:
+   534→            N4 = W4.shape[0]
+   535→            assert W4.shape[1] == K // 2, \
+   536→                f"W4 packed shape {W4.shape} mismatch: expected [N4, {K//2}]"
+   537→        else:
+   538→            N4 = W4.shape[0]
+   539→            assert W4.shape[1] == K, \
+   540→                f"W4 unpacked shape {W4.shape} mismatch: expected [N4, {K}]"
+   541→    else:
+   542→        N4 = 0
+   543→    N = N16 + N8 + N4
+   544→
+   545→    # Validate K is divisible by GROUP_SIZE (128) — required for scale indexing
+   546→    assert K % 128 == 0, \
+   547→        f"K ({K}) must be divisible by 128 (group_size) for scale indexing"
+   548→
+   549→    # Try cupy RawKernel path
+   550→    cp = _check_cupy()
+   551→    kernel = _get_gemm_kernel() if cp is not None else None
+   552→
+   553→    if kernel is not None and X2d.is_cuda:
+   554→        try:
+   555→            # If W4 is unpacked INT8, pack it to uint8 on GPU first
+   556→            # (do this BEFORE the S3 contiguous check so we check the final tensor)
+   557→            if W4 is not None and not W4_packed:
+   558→                W4_eff = _pack_int4_on_gpu(W4)
+   559→            else:
+   560→                W4_eff = W4
+   561→
+   562→            # ---- Seam S3 hardening: log silent copies ----
+   563→            # .contiguous() is called below on every tensor; if any of them
+   564→            # is NOT already contiguous, this triggers a silent GPU memory
+   565→            # copy. On 7B models this can spike memory by 3-5GB and OOM on T4.
+   566→            # Log a warning (not an error) so we can diagnose in production.
+   567→            _silent_copies = []
+   568→            for _name, _t in [("X", X2d), ("W16", W16), ("W8", W8),
+   569→                              ("W4", W4_eff), ("S8", S8), ("S4", S4)]:
+   570→                if _t is not None and not _t.is_contiguous():
+   571→                    _silent_copies.append(
+   572→                        f"{_name}: shape={tuple(_t.shape)}, "
+   573→                        f"strides={_t.stride()}, "
+   574→                        f"size={_t.numel() * _t.element_size() // 1024}KB"
+   575→                    )
+   576→            if _silent_copies:
+   577→                print(f"[shmq_3level_gemm] WARNING: silent contiguous copy on "
+   578→                      f"{len(_silent_copies)} tensors (seam S3): "
+   579→                      f"{'; '.join(_silent_copies[:3])}")
+   580→
+   581→            Y = torch.empty(M, N, dtype=torch.float16, device=X2d.device)
+   582→
+   583→            # Pack arguments — pass None as a 1-element dummy tensor of right type
+   584→            def _to_cp(t, dtype, shape=(1,)):
+   585→                if t is None:
+   586→                    return cp.zeros(shape, dtype=dtype)
+   587→                return cp.from_dlpack(t.detach().contiguous())
+   588→
+   589→            X_cp = cp.from_dlpack(X2d.detach().contiguous())
+   590→            W16_cp = _to_cp(W16, cp.float16, (1, K))
+   591→            W8_cp = _to_cp(W8, cp.int8, (1, K))
+   592→            W4_cp = _to_cp(W4_eff, cp.uint8, (1, max(1, K // 2)))
+   593→            S8_cp = _to_cp(S8, cp.float16, (1, max(1, K // 128)))
+   594→            S4_cp = _to_cp(S4, cp.float16, (1, max(1, K // 128)))
+   595→            Y_cp = cp.from_dlpack(Y)
+   596→
+   597→            # Grid: ceil(N/BN) x ceil(M/BM), block: 128 threads (4 warps)
+   598→            BM, BN = 32, 32
+   599→            grid = ((N + BN - 1) // BN, (M + BM - 1) // BM, 1)
+   600→            block = (128, 1, 1)
+   601→
+   602→            # Shared memory: sX (32*32*2) + sW (32*32*2) = 4096 bytes
+   603→            smem = 2 * 32 * 32 * 2
+   604→
+   605→            kernel(
+   606→                grid, block,
+   607→                (X_cp, W16_cp, W8_cp, W4_cp, S8_cp, S4_cp, Y_cp,
+   608→                 M, K, N, N16, N8, N4),
+   609→                shared_mem=smem,
+   610→            )
+   611→            return Y.reshape(*leading_shape, N)
+   612→        except Exception as e:
+   613→            print(f"[shmq_3level_gemm] cupy kernel failed ({e}); "
+   614→                  f"falling back to PyTorch reference")
+   615→
+   616→    # Fallback: PyTorch reference (correctness, slow)
+   617→    return _pytorch_fallback(X2d, W16, W8, W4, S8, S4, W4_packed,
+   618→                              N16, N8, N4, K, N).reshape(*leading_shape, N)
+   619→
+   620→
+   621→def _pack_int4_on_gpu(W4_int8: torch.Tensor) -> torch.Tensor:
+   622→    """Pack int8 codes (values in [-8, 7]) into uint8 (2 per byte) on GPU."""
+   623→    # W4_int8: [N4, K] int8
+   624→    # Output: [N4, K/2] uint8
+   625→    N4, K = W4_int8.shape
+   626→    biased = (W4_int8.to(torch.int16) & 0x0F).to(torch.uint8)
+   627→    even = biased[:, 0::2]   # [N4, K/2]
+   628→    odd = biased[:, 1::2]    # [N4, K/2]
+   629→    packed = (even << 4) | odd
+   630→    return packed.contiguous()
+   631→
+   632→
+   633→def _pytorch_fallback(X, W16, W8, W4, S8, S4, W4_packed,
+   634→                       N16, N8, N4, K, N) -> torch.Tensor:
+   635→    """Pure-PyTorch reference implementation of the 3-level GEMM.
+   636→
+   637→    Computes Y = X @ [W16; W8; W4].T using FP32 accumulation, with explicit
+   638→    dequantization of INT8/INT4 paths to FP16. Used for correctness checking
+   639→    when cupy is unavailable, and as the verification oracle.
+   640→    """
+   641→    M = X.shape[0]
+   642→    Xf = X.float()
+   643→    Y = torch.zeros(M, N, dtype=torch.float16, device=X.device)
+   644→
+   645→    # FP16 path
+   646→    if N16 > 0:
+   647→        Y[:, :N16] = (Xf @ W16.float().T).to(torch.float16)
+   648→
+   649→    # INT8 path: dequant W8 with per-group scales, then matmul
+   650→    if N8 > 0:
+   651→        n_groups = K // 128
+   652→        # W8: [N8, K] int8, S8: [N8, n_groups] fp16
+   653→        W8_dq = (W8.float()
+   654→                 .reshape(N8, n_groups, 128)
+   655→                 * S8.float().unsqueeze(-1))   # broadcast [N8, n_groups, 1]
+   656→        W8_dq = W8_dq.reshape(N8, K)
+   657→        Y[:, N16:N16 + N8] = (Xf @ W8_dq.T).to(torch.float16)
+   658→
+   659→    # INT4 path: unpack (if packed), dequant with per-group scales, matmul
+   660→    if N4 > 0:
+   661→        n_groups = K // 128
+   662→        if W4_packed:
+   663→            # W4: [N4, K/2] uint8 packed
+   664→            even = ((W4 >> 4) & 0x0F).to(torch.int16)
+   665→            odd = (W4 & 0x0F).to(torch.int16)
+   666→            # Sign-extend
+   667→            even = torch.where(even >= 8, even - 16, even)
+   668→            odd = torch.where(odd >= 8, odd - 16, odd)
+   669→            W4_int8 = torch.stack([even, odd], dim=-1).flatten(start_dim=1).to(torch.int8)
+   670→        else:
+   671→            W4_int8 = W4.to(torch.int8)
+   672→        W4_dq = (W4_int8.float()
+   673→                 .reshape(N4, n_groups, 128)
+   674→                 * S4.float().unsqueeze(-1))
+   675→        W4_dq = W4_dq.reshape(N4, K)
+   676→        Y[:, N16 + N8:] = (Xf @ W4_dq.T).to(torch.float16)
+   677→
+   678→    return Y
+   679→
+   680→
+   681→class SHMQ3LevelKernel:
+   682→    """High-level wrapper around the 3-level GEMM kernel.
+   683→
+   684→    Holds the 3 weight tensors in their native dtypes (FP16 / INT8 / packed
+   685→    INT4) plus per-group scales. Used by `SHMQMixLLMLinear` (in
+   686→    `mixllm/adapter.py`) as the compute backend.
+   687→
+   688→    Usage:
+   689→        kern = SHMQ3LevelKernel.from_linear(linear_layer, n_bits_per_layer)
+   690→        # kern.W16, kern.W8, kern.W4, kern.S8, kern.S4 are now populated
+   691→        y = kern.forward(x)   # x: [..., K] FP16  ->  y: [..., N] FP16
+   692→    """
+   693→
+   694→    def __init__(self,
+   695→                 W16: Optional[torch.Tensor] = None,
+   696→                 W8: Optional[torch.Tensor] = None,
+   697→                 W4_packed: Optional[torch.Tensor] = None,
+   698→                 S8: Optional[torch.Tensor] = None,
+   699→                 S4: Optional[torch.Tensor] = None,
+   700→                 K: int = 0, N: int = 0,
+   701→                 N16: int = 0, N8: int = 0, N4: int = 0,
+   702→                 group_size: int = 128):
+   703→        self.W16 = W16
+   704→        self.W8 = W8
+   705→        self.W4 = W4_packed    # always stored as packed uint8
+   706→        self.S8 = S8
+   707→        self.S4 = S4
+   708→        self.K = K
+   709→        self.N = N
+   710→        self.N16 = N16
+   711→        self.N8 = N8
+   712→        self.N4 = N4
+   713→        self.group_size = group_size
+   714→        cp = _check_cupy()
+   715→        self.cupy_available = cp is not None
+   716→        self.raw_kernel = _get_gemm_kernel() if self.cupy_available else None
+   717→        if self.cupy_available and self.raw_kernel is None:
+   718→            print("[SHMQ3LevelKernel] cupy available but kernel compile failed; "
+   719→                  "falling back to PyTorch reference path")
+   720→        if not self.cupy_available:
+   721→            print("[SHMQ3LevelKernel] cupy not available; using PyTorch reference path "
+   722→                  "(correctness-only, ~10-50x slower than CUDA)")
+   723→
+   724→    @property
+   725→    def is_cuda_native(self) -> bool:
+   726→        """True if the cupy.RawKernel is compiled and ready."""
+   727→        return self.raw_kernel is not None
+   728→
+   729→    @property
+   730→    def device(self) -> torch.device:
+   731→        if self.W16 is not None:
+   732→            return self.W16.device
+   733→        if self.W8 is not None:
+   734→            return self.W8.device
+   735→        if self.W4 is not None:
+   736→            return self.W4.device
+   737→        return torch.device("cpu")
+   738→
+   739→    def to(self, device) -> "SHMQ3LevelKernel":
+   740→        """Move all weight tensors to `device`."""
+   741→        def _move(t):
+   742→            return None if t is None else t.to(device)
+   743→        return SHMQ3LevelKernel(
+   744→            W16=_move(self.W16), W8=_move(self.W8), W4_packed=_move(self.W4),
+   745→            S8=_move(self.S8), S4=_move(self.S4),
+   746→            K=self.K, N=self.N, N16=self.N16, N8=self.N8, N4=self.N4,
+   747→            group_size=self.group_size,
+   748→        )
+   749→
+   750→    def forward(self, X: torch.Tensor) -> torch.Tensor:
+   751→        """Compute Y = X @ [W16; W8; W4].T as a single-kernel GEMM.
+   752→
+   753→        Args:
+   754→            X: [..., K] FP16 (any number of leading dims)
+   755→
+   756→        Returns:
+   757→            Y: [..., N] FP16 (same leading dims as X)
+   758→        """
+   759→        # Per-token activation quantization is NOT applied here — we keep
+   760→        # activations FP16 to preserve the value of the FP16 weight path.
+   761→        # (Original SHMQ paper uses W4.8A8, but for the 3-level {4,8,16}
+   762→        # design, FP16 activations are the natural choice.)
+   763→        return shmq_3level_gemm(
+   764→            X, self.W16, self.W8, self.W4, self.S8, self.S4,
+   765→            W4_packed=True,
+   766→        )
+   767→
+   768→    @staticmethod
+   769→    def from_weight_pack(pack: Dict[str, torch.Tensor],
+   770→                          n_bits: int,
+   771→                          device: Optional[torch.device] = None,
+   772→                          group_size: int = 128) -> "SHMQ3LevelKernel":
+   773→        """Build a SHMQ3LevelKernel from a pack dict (output of
+   774→        `inference.weight_packing.pack_shmq_linear`).
+   775→
+   776→        For 2-level packs ({4, 8} only — original SHMQ), this places:
+   777→          - INT8 portion into W8
+   778→          - INT4 portion into W4
+   779→          - W16 = None
+   780→        For full 3-level packs ({4, 8, 16}), the caller should provide
+   781→        separate W16, W8, W4 buffers and use the constructor directly.
+   782→
+   783→        Args:
+   784→            pack: dict with keys qweight_int8, scales_int8, qweight_int4,
+   785→                  scales_int4, in_features, out_features, n_sensitive.
+   786→            n_bits: the per-layer bit-width (4 or 8) — used to decide
+   787→                    whether to use W8 (8-bit) or W4 (4-bit) exclusively.
+   788→        """
+   789→        K = pack["in_features"]
+   790→        N = pack["out_features"]
+   791→        n_sens = pack["n_sensitive"]
+   792→
+   793→        W8 = pack.get("qweight_int8", None)
+   794→        S8 = pack.get("scales_int8", None)
+   795→        W4 = pack.get("qweight_int4", None)
+   796→        S4 = pack.get("scales_int4", None)
+   797→
+   798→        if device is not None:
+   799→            W8 = W8.to(device) if W8 is not None else None
+   800→            S8 = S8.to(device) if S8 is not None else None
+   801→            W4 = W4.to(device) if W4 is not None else None
+   802→            S4 = S4.to(device) if S4 is not None else None
+   803→
+   804→        # For 2-level SHMQ packs:
+   805→        #   if n_bits == 8: layer is fully 8-bit (W4=None, W8 has N rows)
+   806→        #   if n_bits == 4: layer is mixed (W8 has n_sens rows, W4 has N-n_sens rows)
+   807→        if n_bits == 8:
+   808→            N8 = N
+   809→            N4 = 0
+   810→            N16 = 0
+   811→        else:
+   812→            N8 = n_sens
+   813→            N4 = N - n_sens
+   814→            N16 = 0
+   815→
+   816→        return SHMQ3LevelKernel(
+   817→            W16=None, W8=W8, W4_packed=W4, S8=S8, S4=S4,
+   818→            K=K, N=N, N16=N16, N8=N8, N4=N4,
+   819→            group_size=group_size,
+   820→        )
+   821→
+   822→
+   823→# ---------------------------------------------------------------------------
+   824→# Smoke test / verification helpers
+   825→# ---------------------------------------------------------------------------
+   826→
+   827→def verify_against_pytorch(M: int = 64, K: int = 256, N: int = 96,
+   828→                            N16: int = 32, N8: int = 32, N4: int = 32,
+   829→                            device: str = "cuda",
+   830→                            tol: float = 1e-2) -> Tuple[torch.Tensor, torch.Tensor, float]:
+   831→    """Generate random inputs, run both cupy kernel and PyTorch fallback,
+   832→    return (Y_cuda, Y_ref, max_abs_diff).
+   833→
+   834→    Useful as a sanity check after kernel compilation. Requires cupy + GPU.
+   835→    """
+   836→    torch.manual_seed(42)
+   837→    X = torch.randn(M, K, dtype=torch.float16, device=device) * 0.1
+   838→    W16 = torch.randn(N16, K, dtype=torch.float16, device=device) * 0.1
+   839→    W8 = torch.randint(-127, 127, (N8, K), dtype=torch.int8, device=device)
+   840→    W4_codes = torch.randint(-7, 8, (N4, K), dtype=torch.int8, device=device)
+   841→    # Pack W4
+   842→    W4_packed = _pack_int4_on_gpu(W4_codes)
+   843→    n_groups = K // 128
+   844→    S8 = torch.randn(N8, n_groups, dtype=torch.float16, device=device) * 0.01
+   845→    S4 = torch.randn(N4, n_groups, dtype=torch.float16, device=device) * 0.1
+   846→
+   847→    # CUDA path
+   848→    Y_cuda = shmq_3level_gemm(X, W16, W8, W4_packed, S8, S4, W4_packed=True)
+   849→
+   850→    # Reference path (force PyTorch fallback by temporarily disabling cupy)
+   851→    global _CUPY_AVAILABLE
+   852→    saved = _CUPY_AVAILABLE
+   853→    _CUPY_AVAILABLE = False
+   854→    try:
+   855→        Y_ref = shmq_3level_gemm(X, W16, W8, W4_packed, S8, S4, W4_packed=True)
+   856→    finally:
+   857→        _CUPY_AVAILABLE = saved
+   858→
+   859→    diff = (Y_cuda.float() - Y_ref.float()).abs().max().item()
+   860→    return Y_cuda, Y_ref, diff
+   861→

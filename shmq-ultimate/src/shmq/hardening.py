@@ -55,10 +55,12 @@ def assert_cluster_sizes_consistent(
         layer_names: list of layer names to check.
         bit_allocation: per-layer bit allocation from ILP {4, 8, 16}.
         cluster_sizes: per-layer {16, 8, 4} -> channel count.
-        ilp_total_bits: total bits achieved by ILP (from ILPResult3L.total_bits).
-            If None, the C-2 check is skipped.
-        n_params: per-layer param count (only needed for C-2).
-        target_avg_bits: ILP target (only needed for C-2).
+        ilp_total_bits: AVERAGE bits per parameter achieved by ILP
+            (from ILPResult3L.total_bits, which despite its name stores the
+            average — see solver_3level.py:225). If None, C-2 is skipped.
+        n_params: per-layer param count (used to compute the achieved avg
+            from cluster_sizes independently of the ILP, for cross-check).
+        target_avg_bits: ILP target average bits per parameter.
         isa_drift_tolerance: max allowed drift in avg-bits after ISA rounding.
 
     Raises:
@@ -85,20 +87,48 @@ def assert_cluster_sizes_consistent(
             assert cs.get(4, 0) == 0, \
                 f"Layer {name} is 8-bit but has INT4 clusters: {cs}"
 
-    # ---- C-2: ISA drift check (only if ILP total provided) ----
-    if (ilp_total_bits is not None and n_params is not None
-            and target_avg_bits is not None):
-        total_params = sum(n_params.values())
-        if total_params > 0:
-            achieved_avg = ilp_total_bits / total_params
-            drift = abs(achieved_avg - target_avg_bits)
-            assert drift <= isa_drift_tolerance, (
-                f"ISA matching drift too large: ILP target={target_avg_bits:.4f} bits, "
-                f"achieved={achieved_avg:.4f} bits, drift={drift:.4f} > "
-                f"tolerance={isa_drift_tolerance:.4f}. This means ISA rounding "
-                f"silently moved the budget outside the ILP solution. "
-                f"Either reduce isa_tile_* sizes or increase isa_drift_tolerance."
-            )
+    # ---- C-2: ISA drift check (only if ILP avg provided) ----
+    # NOTE: ILPResult3L.total_bits is actually the AVERAGE bits per parameter
+    # (see solver_3level.py:225: `avg_bits = total_bits_weighted / max(total_params, 1)`).
+    # So we compare it directly to target_avg_bits — do NOT divide by total_params.
+    if (ilp_total_bits is not None and target_avg_bits is not None):
+        # ilp_total_bits IS the achieved avg from the ILP solver
+        achieved_avg = float(ilp_total_bits)
+        drift = abs(achieved_avg - target_avg_bits)
+        assert drift <= isa_drift_tolerance, (
+            f"ISA matching drift too large: ILP target={target_avg_bits:.4f} bits, "
+            f"achieved={achieved_avg:.4f} bits, drift={drift:.4f} > "
+            f"tolerance={isa_drift_tolerance:.4f}. This means ISA rounding "
+            f"silently moved the budget outside the ILP solution. "
+            f"Either reduce isa_tile_* sizes or increase isa_drift_tolerance."
+        )
+
+        # Cross-check: compute achieved avg independently from cluster_sizes
+        # + n_params, and verify it matches the ILP's reported avg.
+        if n_params is not None:
+            total_params = sum(n_params.values())
+            if total_params > 0:
+                independent_total = 0.0
+                for name in layer_names:
+                    if name not in cluster_sizes or name not in n_params:
+                        continue
+                    cs = cluster_sizes[name]
+                    n16 = cs.get(16, 0)
+                    n8  = cs.get(8, 0)
+                    n4  = cs.get(4, 0)
+                    # bits contribution: 16*n16 + 8*n8 + 4*n4 per layer
+                    independent_total += (16 * n16 + 8 * n8 + 4 * n4) * (
+                        n_params[name] / max(n16 + n8 + n4, 1)
+                    )
+                independent_avg = independent_total / total_params
+                # The independent computation may differ from ILP avg by
+                # ISA rounding — but should be within tolerance too.
+                independent_drift = abs(independent_avg - target_avg_bits)
+                assert independent_drift <= max(isa_drift_tolerance, 0.5), (
+                    f"ISA matching drift (independent recompute) too large: "
+                    f"target={target_avg_bits:.4f}, recomputed={independent_avg:.4f}, "
+                    f"drift={independent_drift:.4f}. Cluster sizes likely wrong."
+                )
 
 
 # ===========================================================================

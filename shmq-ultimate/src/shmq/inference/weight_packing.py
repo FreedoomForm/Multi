@@ -69,37 +69,50 @@ def _symmetric_quantize_int(w: torch.Tensor, n_bits: int, group_size: int
 
 
 def pack_int4(codes_int8: torch.Tensor) -> torch.Tensor:
-    """Pack int8 codes (low-nibble only, values in [-7, 7]) into uint8 (2 per byte).
+    """Pack int8 codes (low-nibble only, values in [-8, 7]) into uint8 (2 per byte).
 
-    Layout: byte i (along the in_features dimension) holds:
-        high nibble = codes[2*i]
-        low  nibble = codes[2*i+1]
+    Layout (MUST match the CUDA kernel `shmq_3level_gemm_kernel` convention):
+        For byte i (along the in_features dimension):
+            low  nibble = codes[2*i]     (EVEN index -> LOW nibble)
+            high nibble = codes[2*i+1]   (ODD index  -> HIGH nibble)
 
-    Signed 4-bit values are stored in two's-complement nibble form.
+    This is also the MixLLM convention (`pack_int4_weights` in adapter.py),
+    and the convention used by Marlin/AWQ. Signed 4-bit values are stored
+    in two's-complement nibble form (low 4 bits of the int8 code).
     """
     assert codes_int8.dtype == torch.int8
     assert codes_int8.dim() == 2
     out_features, in_features = codes_int8.shape
     assert in_features % 2 == 0, "in_features must be even for INT4 packing"
-    # Convert to uint8 by adding 8 (bias) so range [-8,7] -> [0,15], then pack.
-    # Note: although our symmetric range is [-7,7] (max_q=7), GPTQ might push
-    # values to -8 in principle; we handle the full [-8,7] range to be safe.
-    biased = (codes_int8.to(torch.int16) & 0x0F).to(torch.uint8)  # mask low nibble
-    even = biased[:, 0::2]   # (out_features, in_features/2)
-    odd  = biased[:, 1::2]
-    packed = (even << 4) | odd   # (out_features, in_features/2) uint8
+    # Take the low 4 bits of each int8 code. For values in [-8, 7] stored as
+    # int8 (two's-complement), the low 4 bits already encode the signed value
+    # in two's-complement nibble form:
+    #   -8 (11111000) -> low nibble 1000 = 8  (represents -8 in 4-bit 2's comp)
+    #   -1 (11111111) -> low nibble 1111 = 15 (represents -1)
+    #    0 (00000000) -> low nibble 0000 = 0
+    #    7 (00000111) -> low nibble 0111 = 7
+    nibbles = (codes_int8.to(torch.int16) & 0x0F).to(torch.uint8)  # mask low nibble
+    # EVEN index -> LOW nibble, ODD index -> HIGH nibble
+    low  = nibbles[:, 0::2]   # (out_features, in_features/2) — even indices
+    high = nibbles[:, 1::2]   # (out_features, in_features/2) — odd indices
+    packed = (high << 4) | low   # (out_features, in_features/2) uint8
     return packed.contiguous()
 
 
 def unpack_int4(packed_uint8: torch.Tensor) -> torch.Tensor:
-    """Inverse of pack_int4: returns int8 codes in [-8, 7]."""
+    """Inverse of pack_int4: returns int8 codes in [-8, 7].
+
+    Convention (matches CUDA kernel and MixLLM):
+        LOW nibble  = even index
+        HIGH nibble = odd index
+    """
     assert packed_uint8.dtype == torch.uint8
-    even = ((packed_uint8 >> 4) & 0x0F).to(torch.int16)
-    odd  = ( packed_uint8       & 0x0F).to(torch.int16)
+    low  = ( packed_uint8       & 0x0F).to(torch.int16)  # even indices
+    high = ((packed_uint8 >> 4) & 0x0F).to(torch.int16)  # odd indices
     # Sign-extend from 4 bits: values 8..15 should become -8..-1
-    even = torch.where(even >= 8, even - 16, even)
-    odd  = torch.where(odd  >= 8, odd  - 16, odd)
-    out = torch.stack([even, odd], dim=-1).flatten(start_dim=1)
+    low  = torch.where(low  >= 8, low  - 16, low)
+    high = torch.where(high >= 8, high - 16, high)
+    out = torch.stack([low, high], dim=-1).flatten(start_dim=1)
     return out.to(torch.int8)
 
 

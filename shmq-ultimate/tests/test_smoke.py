@@ -63,7 +63,14 @@ def test_config():
     assert config.target_hp_ratio == 0.20
     assert config.base_hp_ratio == 0.125
     assert config.dampening == 0.1
-    assert config.bit_levels == (4, 8)
+    # SHMQ-Ultimate uses 3 levels {4, 8, 16} (FP16 + INT8 + INT4 in one kernel)
+    assert config.bit_levels == (4, 8, 16), \
+        f"Expected 3-level (4, 8, 16), got {config.bit_levels}"
+    assert config.target_hp_ratio_16 == 0.05, \
+        f"Expected target_hp_ratio_16=0.05, got {config.target_hp_ratio_16}"
+    # 0.75*4 + 0.20*8 + 0.05*16 = 3.0 + 1.6 + 0.8 = 5.4 bits/param
+    assert abs(config.computed_target_avg_bits - 5.4) < 0.01, \
+        f"Expected target_avg_bits=5.4, got {config.computed_target_avg_bits}"
     assert config.autoround_lr > 0
     print("PASS\n")
 

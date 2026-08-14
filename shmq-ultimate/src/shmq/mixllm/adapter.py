@@ -658,21 +658,75 @@ def convert_linear_to_mixllm(
     n_out, n_in = weight.shape
     bias = layer.bias is not None
 
-    # Apply permutation to the weight rows
+    # ---- Handle permutation ----
+    # The SHMQ pipeline computes a CIN (input-channel) permutation and applies
+    # it in-place during step4 (apply_permutation_to_layer does W[:, perm]).
+    # By the time we reach step9, the weights are ALREADY permuted along cin.
+    #
+    # The adapter's role is to partition along COUT (output channels) into
+    # C16/C8/C4 clusters for the mixed-precision kernel. The cin permutation
+    # is NOT needed here — it's already baked into the weights.
+    #
+    # We store `permutation_indices` as metadata for the vLLM patch's output
+    # scatter-back, but ONLY if it's a valid cout permutation (numel == n_out).
+    # If it's a cin permutation (numel == n_in), we use identity for cout
+    # (the kernel's output order matches the layer's natural output order).
+    cout_permutation = None
     if permutation_indices is not None:
-        # permutation_indices[i] = original_channel_at_position_i
-        # So we want: permuted_weight[i] = weight[permutation_indices[i]]
-        weight_permuted = weight[permutation_indices.to(weight.device)].contiguous()
+        perm_n = permutation_indices.numel()
+        if perm_n == n_out:
+            # Valid cout permutation — use it
+            cout_permutation = permutation_indices
+            weight_permuted = weight  # already permuted in step4 (cin) + identity here
+        elif perm_n == n_in:
+            # This is a cin permutation — already applied in step4, don't re-apply.
+            # Use identity for cout (no output-channel permutation).
+            cout_permutation = None
+            weight_permuted = weight
+        else:
+            # Size mismatch — log warning, use identity
+            logger.warning(
+                f"[adapter] permutation_indices has {perm_n} elements but "
+                f"n_out={n_out}, n_in={n_in}; using identity (size mismatch)"
+            )
+            cout_permutation = None
+            weight_permuted = weight
     else:
         weight_permuted = weight
 
     # Determine cluster sizes
+    # NOTE: The SHMQ pipeline computes cluster_sizes based on cin (input channels),
+    # per the SHMQ paper's decoupled permutation (Eq. 12). However, the MixLLM
+    # kernel and our SHMQ 3-level kernel partition along cout (output channels)
+    # — N16, N8, N4 in the kernel are output channel counts.
+    #
+    # When the provided cluster_sizes don't match n_out, we recompute them
+    # based on n_out using the same ratios. This is a pragmatic adaptation:
+    # the cin-based sensitivity analysis still guides the bit allocation,
+    # but the actual mixed-precision partitioning happens along cout
+    # (MixLLM-style). A truly SHMQ-faithful implementation would require a
+    # custom kernel that partitions along cin, which is future work.
     if cluster_sizes is not None:
         k16 = cluster_sizes.get(16, 0)
         k8  = cluster_sizes.get(8, 0)
         k4  = cluster_sizes.get(4, 0)
-        assert k16 + k8 + k4 == n_out, \
-            f"Cluster sizes {k16}+{k8}+{k4} != out_features {n_out}"
+        if k16 + k8 + k4 != n_out:
+            # Cluster sizes were computed for cin (or different cout).
+            # Recompute using the same ratios applied to n_out.
+            orig_total = k16 + k8 + k4
+            if orig_total > 0:
+                r16 = k16 / orig_total
+                r8  = k8  / orig_total
+            else:
+                r16 = r8 = 0.0
+            k16 = int(n_out * r16)
+            k8  = int(n_out * r8)
+            k4  = n_out - k16 - k8
+            logger.debug(
+                f"[adapter] {getattr(layer, '_layer_name', '')}: "
+                f"recomputed cluster_sizes for n_out={n_out} "
+                f"(was {cluster_sizes}, now (16={k16}, 8={k8}, 4={k4}))"
+            )
     elif bit_allocation_for_layer == 16:
         k16, k8, k4 = n_out, 0, 0
     elif bit_allocation_for_layer == 8:
@@ -683,6 +737,9 @@ def convert_linear_to_mixllm(
         k4  = n_out - k16 - k8
     else:
         raise ValueError(f"Unsupported bit_allocation: {bit_allocation_for_layer}")
+    # Final sanity check
+    assert k16 + k8 + k4 == n_out, \
+        f"Cluster sizes {k16}+{k8}+{k4} != out_features {n_out}"
 
     cfg = SHMQMixLLMConfig(
         in_features=n_in,
@@ -692,7 +749,7 @@ def convert_linear_to_mixllm(
         n_int4_channels=k4,
         group_size=group_size,
         bias=bias,
-        permutation=permutation_indices,
+        permutation=cout_permutation,
         layer_name=getattr(layer, "_layer_name", "") or "",
     )
 

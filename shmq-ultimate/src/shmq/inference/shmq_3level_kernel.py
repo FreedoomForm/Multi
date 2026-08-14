@@ -619,14 +619,22 @@ def shmq_3level_gemm(
 
 
 def _pack_int4_on_gpu(W4_int8: torch.Tensor) -> torch.Tensor:
-    """Pack int8 codes (values in [-8, 7]) into uint8 (2 per byte) on GPU."""
-    # W4_int8: [N4, K] int8
-    # Output: [N4, K/2] uint8
+    """Pack int8 codes (values in [-8, 7]) into uint8 (2 per byte) on GPU.
+
+    Convention (MUST match the CUDA kernel `shmq_3level_gemm_kernel`):
+        LOW  nibble = EVEN index (gk even)
+        HIGH nibble = ODD  index (gk odd)
+    This is the same convention as MixLLM's `pack_int4_weights` and
+    `weight_packing.pack_int4`.
+    """
+    # W4_int8: [N4, K] int8, values in [-8, 7]
+    # Output:  [N4, K/2] uint8
     N4, K = W4_int8.shape
-    biased = (W4_int8.to(torch.int16) & 0x0F).to(torch.uint8)
-    even = biased[:, 0::2]   # [N4, K/2]
-    odd = biased[:, 1::2]    # [N4, K/2]
-    packed = (even << 4) | odd
+    # Take low 4 bits (two's-complement nibble for values in [-8, 7])
+    nibbles = (W4_int8.to(torch.int16) & 0x0F).to(torch.uint8)
+    low  = nibbles[:, 0::2]   # EVEN indices -> LOW nibble
+    high = nibbles[:, 1::2]   # ODD indices  -> HIGH nibble
+    packed = (high << 4) | low
     return packed.contiguous()
 
 
@@ -661,12 +669,16 @@ def _pytorch_fallback(X, W16, W8, W4, S8, S4, W4_packed,
         n_groups = K // 128
         if W4_packed:
             # W4: [N4, K/2] uint8 packed
-            even = ((W4 >> 4) & 0x0F).to(torch.int16)
-            odd = (W4 & 0x0F).to(torch.int16)
-            # Sign-extend
-            even = torch.where(even >= 8, even - 16, even)
-            odd = torch.where(odd >= 8, odd - 16, odd)
-            W4_int8 = torch.stack([even, odd], dim=-1).flatten(start_dim=1).to(torch.int8)
+            # Convention (matches CUDA kernel + MixLLM + weight_packing.pack_int4):
+            #   LOW  nibble = EVEN index
+            #   HIGH nibble = ODD  index
+            low  = ( W4        & 0x0F).to(torch.int16)   # even indices
+            high = ((W4 >> 4) & 0x0F).to(torch.int16)   # odd indices
+            # Sign-extend from 4 bits: values 8..15 become -8..-1
+            low  = torch.where(low  >= 8, low  - 16, low)
+            high = torch.where(high >= 8, high - 16, high)
+            # Interleave: [low[0], high[0], low[1], high[1], ...]
+            W4_int8 = torch.stack([low, high], dim=-1).flatten(start_dim=1).to(torch.int8)
         else:
             W4_int8 = W4.to(torch.int8)
         W4_dq = (W4_int8.float()

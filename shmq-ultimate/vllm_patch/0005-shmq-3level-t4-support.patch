@@ -256,11 +256,16 @@ index 0000000..2222222
 +        if self.N4 > 0 and self.W4_packed is not None and self.S4 is not None:
 +            n_groups = self.K // self.group_size
 +            packed = self.W4_packed
-+            even = ((packed >> 4) & 0x0F).to(torch.int16)
-+            odd = (packed & 0x0F).to(torch.int16)
-+            even = torch.where(even >= 8, even - 16, even)
-+            odd = torch.where(odd >= 8, odd - 16, odd)
-+            W4_int8 = torch.stack([even, odd], dim=-1).flatten(start_dim=1).to(torch.int8)
++            # Convention (matches CUDA kernel + MixLLM + weight_packing.pack_int4):
++            #   LOW  nibble = EVEN index
++            #   HIGH nibble = ODD  index
++            low  = ( packed        & 0x0F).to(torch.int16)   # even indices
++            high = ((packed >> 4) & 0x0F).to(torch.int16)   # odd indices
++            # Sign-extend from 4 bits: values 8..15 become -8..-1
++            low  = torch.where(low  >= 8, low  - 16, low)
++            high = torch.where(high >= 8, high - 16, high)
++            # Interleave: [low[0], high[0], low[1], high[1], ...]
++            W4_int8 = torch.stack([low, high], dim=-1).flatten(start_dim=1).to(torch.int8)
 +            W4_dq = (W4_int8.float()
 +                     .reshape(self.N4, n_groups, self.group_size)
 +                     * self.S4.float().unsqueeze(-1))
